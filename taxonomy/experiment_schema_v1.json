@@ -1,0 +1,26 @@
+{
+  "experiment_id": "EXP_001",
+  "experiment_name": "representation_benchmark",
+  "baseline": {
+    "input_type": "gray"
+  },
+  "candidate": {
+    "input_type": "gray_rgb"
+  },
+  "evaluation_metrics": [
+    "f1",
+    "precision",
+    "recall",
+    "iou",
+    "fp_rate",
+    "fn_rate"
+  ],
+  "representation_metrics": [
+    "delta_e",
+    "histogram_similarity",
+    "enhancement_drift",
+    "saturation_drift",
+    "edge_amplification_ratio"
+  ],
+  "status": "draft"
+}
