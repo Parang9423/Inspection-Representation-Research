@@ -1,0 +1,19 @@
+{
+  "dataset_version": "1.0",
+  "dataset_name": "dataset_x",
+  "site_id": "S01",
+  "machine_id": "M01",
+  "product_id": "P01",
+  "representation_type": "gray",
+  "samples": [
+    {
+      "image_id": "IMG_000001",
+      "defect_id": "D01",
+      "label": "NG",
+      "metadata": {
+        "lighting_profile": "default",
+        "capture_mode": "production"
+      }
+    }
+  ]
+}
