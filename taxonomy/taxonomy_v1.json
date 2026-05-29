@@ -1,0 +1,24 @@
+{
+  "project": "Inspection Representation Research",
+  "version": "1.0",
+  "defect_taxonomy": {
+    "D01": {"type": "Boundary", "description": "Boundary anomaly"},
+    "D02": {"type": "Linear", "description": "Linear anomaly"},
+    "D03": {"type": "Region", "description": "Region anomaly"},
+    "D04": {"type": "Texture", "description": "Texture anomaly"},
+    "D05": {"type": "Contrast", "description": "Contrast anomaly"},
+    "D06": {"type": "Height", "description": "Height-related anomaly"}
+  },
+  "machine_taxonomy": {
+    "M01": {},
+    "M02": {}
+  },
+  "product_taxonomy": {
+    "P01": {},
+    "P02": {}
+  },
+  "site_taxonomy": {
+    "S01": {},
+    "S02": {}
+  }
+}
