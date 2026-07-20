@@ -113,6 +113,10 @@ def acquire_lock(image_id: str, request: ActorRequest) -> dict:
                review_status='reviewing',locked_by=excluded.locked_by,locked_at=excluded.locked_at,updated_at=excluded.updated_at""",
             (image_id, row["label"], request.actor, request.actor, now, now),
         )
+        conn.execute(
+            "UPDATE images SET assigned_to=?,review_status='reviewing',locked_by=?,locked_at=? WHERE image_id=?",
+            (request.actor, request.actor, now, image_id),
+        )
         refresh_folder_counts(conn)
         updated = fetch_image(conn, image_id)
     return serialize(updated)
@@ -121,12 +125,19 @@ def acquire_lock(image_id: str, request: ActorRequest) -> dict:
 @router.post("/images/{image_id}/unlock")
 def release_lock(image_id: str, request: ActorRequest) -> dict:
     ensure_normalized_schema()
+    now = iso_now()
     with connect() as conn:
         conn.execute(
             """UPDATE image_annotations SET locked_by=NULL,locked_at=NULL,
                review_status=CASE WHEN review_status='reviewing' THEN 'unreviewed' ELSE review_status END,
                updated_at=? WHERE image_id=? AND locked_by=?""",
-            (iso_now(), image_id, request.actor),
+            (now, image_id, request.actor),
+        )
+        conn.execute(
+            """UPDATE images SET locked_by=NULL,locked_at=NULL,
+               review_status=CASE WHEN review_status='reviewing' THEN 'unreviewed' ELSE review_status END
+               WHERE image_id=? AND locked_by=?""",
+            (image_id, request.actor),
         )
         refresh_folder_counts(conn)
     return {"released": True}
@@ -135,10 +146,15 @@ def release_lock(image_id: str, request: ActorRequest) -> dict:
 @router.post("/images/{image_id}/heartbeat")
 def heartbeat(image_id: str, request: ActorRequest) -> dict:
     ensure_normalized_schema()
+    now = iso_now()
     with connect() as conn:
         cursor = conn.execute(
             "UPDATE image_annotations SET locked_at=?,updated_at=? WHERE image_id=? AND locked_by=?",
-            (iso_now(), iso_now(), image_id, request.actor),
+            (now, now, image_id, request.actor),
+        )
+        conn.execute(
+            "UPDATE images SET locked_at=? WHERE image_id=? AND locked_by=?",
+            (now, image_id, request.actor),
         )
     return {"renewed": cursor.rowcount == 1}
 
@@ -161,12 +177,17 @@ def update_image(request: UpdateRequest) -> dict:
             conn.execute(
                 """INSERT INTO image_annotations(image_id,current_label,review_status,assigned_to,reviewed_by,
                    reviewed_at,version,locked_by,locked_at,updated_at)
-                   VALUES(?,?,'reviewed',?,?,?, ?,NULL,NULL,?)
+                   VALUES(?,?,'reviewed',?,?,?,?,NULL,NULL,?)
                    ON CONFLICT(image_id) DO UPDATE SET current_label=excluded.current_label,
                    review_status='reviewed',assigned_to=excluded.assigned_to,reviewed_by=excluded.reviewed_by,
                    reviewed_at=excluded.reviewed_at,version=excluded.version,locked_by=NULL,locked_at=NULL,
                    updated_at=excluded.updated_at""",
                 (request.image_id, request.label, request.actor, request.actor, now, new_version, now),
+            )
+            conn.execute(
+                """UPDATE images SET label=?,review_status='reviewed',assigned_to=?,reviewed_by=?,
+                   reviewed_at=?,version=?,locked_by=NULL,locked_at=NULL,updated_at=? WHERE image_id=?""",
+                (request.label, request.actor, request.actor, now, new_version, now, request.image_id),
             )
             if request.label != row["label"]:
                 conn.execute(
@@ -180,6 +201,11 @@ def update_image(request: UpdateRequest) -> dict:
                    reviewed_at=?,version=?,locked_by=NULL,locked_at=NULL,updated_at=? WHERE image_id=?""",
                 (request.actor, request.actor, now, new_version, now, request.image_id),
             )
+            conn.execute(
+                """UPDATE images SET review_status='reviewed',assigned_to=?,reviewed_by=?,reviewed_at=?,
+                   version=?,locked_by=NULL,locked_at=NULL,updated_at=? WHERE image_id=?""",
+                (request.actor, request.actor, now, new_version, now, request.image_id),
+            )
 
         if request.split is not None:
             previous_split = row["split"]
@@ -189,6 +215,7 @@ def update_image(request: UpdateRequest) -> dict:
                    assigned_by=excluded.assigned_by,assigned_at=excluded.assigned_at,split_version=split_version+1""",
                 (request.image_id, request.split, request.actor, now),
             )
+            conn.execute("UPDATE images SET split=?,updated_at=? WHERE image_id=?", (request.split, now, request.image_id))
             if request.split != previous_split:
                 conn.execute(
                     "INSERT INTO split_history(image_id,previous_split,new_split,changed_by,changed_at) VALUES(?,?,?,?,?)",
