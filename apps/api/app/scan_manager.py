@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,11 +53,7 @@ def get_scan_status() -> dict[str, Any]:
 
 
 def _iter_images(root: Path) -> Iterator[tuple[str, str, str, int, float]]:
-    """Yield top-level folder, absolute path, filename, size and mtime.
-
-    os.scandir reuses directory-entry metadata on most filesystems, avoiding a
-    separate Path.stat call for every image.
-    """
+    """Yield top-level folder, absolute path, filename, size and mtime."""
     if not root.exists():
         return
     try:
@@ -86,8 +81,7 @@ def _iter_images(root: Path) -> Iterator[tuple[str, str, str, int, float]]:
                             continue
                         if not entry.is_file(follow_symlinks=False):
                             continue
-                        suffix = Path(entry.name).suffix.lower()
-                        if suffix not in IMAGE_EXTENSIONS:
+                        if Path(entry.name).suffix.lower() not in IMAGE_EXTENSIONS:
                             continue
                         stat = entry.stat(follow_symlinks=False)
                         yield (
@@ -111,7 +105,6 @@ def _chunks(items: list[Any], size: int = _BATCH_SIZE) -> Iterator[list[Any]]:
 
 
 def _run_scan() -> None:
-    started_at = _now()
     _set_state(
         status="discovering",
         phase="discovering",
@@ -123,7 +116,7 @@ def _run_scan() -> None:
         updated=0,
         unchanged=0,
         deactivated=0,
-        started_at=started_at,
+        started_at=_now(),
         finished_at=None,
         error=None,
     )
@@ -183,7 +176,7 @@ def _run_scan() -> None:
                         split_rows.append((image_id, now))
                         added += 1
                     else:
-                        image_id, old_size, old_mtime, old_active = current
+                        _image, old_size, old_mtime, old_active = current
                         if old_size != size_bytes or old_mtime != modified_at or old_active != 1:
                             update_rows.append((
                                 folder_id, filename, size_bytes, modified_at,
@@ -243,16 +236,18 @@ def _run_scan() -> None:
             deactivated=deactivated,
             finished_at=_now(),
         )
-    except Exception as exc:  # noqa: BLE001 - surfaced through status API
+    except Exception as exc:  # noqa: BLE001
         _set_state(status="failed", phase="failed", error=f"{type(exc).__name__}: {exc}", finished_at=_now())
 
 
 def start_background_scan() -> dict[str, Any]:
     global _scan_thread
+    should_start = False
     with _state_lock:
-        if _scan_thread is not None and _scan_thread.is_alive():
-            return get_scan_status()
-        _scan_thread = threading.Thread(target=_run_scan, name="aoi-dataset-scan", daemon=True)
+        if _scan_thread is None or not _scan_thread.is_alive():
+            _scan_thread = threading.Thread(target=_run_scan, name="aoi-dataset-scan", daemon=True)
+            should_start = True
+    if should_start:
         _scan_thread.start()
     return get_scan_status()
 
