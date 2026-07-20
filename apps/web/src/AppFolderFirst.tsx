@@ -259,11 +259,14 @@ function AppContent() {
         </Sider>
         <Layout>
           <Header className="header collaborative-header">
-            <div>
+            <div className="collaborative-header-main">
               <Typography.Title level={3}>AOI 학습 데이터셋 관리자</Typography.Title>
               <Typography.Text type="secondary">폴더 기반 탐색 · 동시 검수 · 충돌 방지</Typography.Text>
             </div>
-            <Button icon={<UserOutlined />} onClick={() => setWorkerOpen(true)}>작업자: {worker || '미설정'}</Button>
+            <div className="collaborative-header-worker">
+              <Typography.Text type="secondary">현재 작업자</Typography.Text>
+              <Button icon={<UserOutlined />} onClick={() => setWorkerOpen(true)}>{worker || '미설정'}</Button>
+            </div>
           </Header>
           <Content className="content">{worker ? content[menu] : <Empty description="작업자를 설정하세요." />}</Content>
         </Layout>
