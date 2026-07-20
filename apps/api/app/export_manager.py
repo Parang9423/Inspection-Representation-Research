@@ -122,7 +122,17 @@ def queue_export(request: ExportRequest) -> dict[str, Any]:
         _export_dataset,
         request.model_dump(),
     )
-    return {"accepted": True, **task}
+    return {
+        "accepted": True,
+        "version": "작업 대기 중",
+        "count": 0,
+        **task,
+    }
+
+
+@router.get("/api/exports/tasks/latest")
+def latest_export_task() -> dict[str, Any]:
+    return worker.latest("export") or {"status": "idle"}
 
 
 @router.get("/api/exports/tasks/{task_id}")
@@ -131,8 +141,3 @@ def export_task_status(task_id: str) -> dict[str, Any]:
     if not task or task.get("task_type") != "export":
         raise HTTPException(404, "내보내기 작업을 찾을 수 없습니다.")
     return task
-
-
-@router.get("/api/exports/tasks/latest")
-def latest_export_task() -> dict[str, Any]:
-    return worker.latest("export") or {"status": "idle"}
