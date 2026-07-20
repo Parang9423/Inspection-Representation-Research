@@ -11,11 +11,11 @@ from fastapi import APIRouter, HTTPException
 
 from . import data_model
 from .main import DATA_ROOT, IMAGE_EXTENSIONS
+from .task_worker import worker
 
 router = APIRouter(tags=["dataset-scan"])
 _BATCH_SIZE = 500
 _state_lock = threading.Lock()
-_scan_thread: threading.Thread | None = None
 _state: dict[str, Any] = {
     "status": "idle",
     "phase": "idle",
@@ -30,6 +30,7 @@ _state: dict[str, Any] = {
     "started_at": None,
     "finished_at": None,
     "error": None,
+    "task_id": None,
 }
 
 
@@ -48,7 +49,7 @@ def get_scan_status() -> dict[str, Any]:
     total = int(result.get("total") or 0)
     processed = int(result.get("processed") or 0)
     result["percent"] = round(processed * 100 / total, 1) if total else 0.0
-    result["running"] = result.get("status") in {"discovering", "running"}
+    result["running"] = result.get("status") in {"queued", "discovering", "running"}
     return result
 
 
@@ -104,7 +105,7 @@ def _chunks(items: list[Any], size: int = _BATCH_SIZE) -> Iterator[list[Any]]:
         yield items[index:index + size]
 
 
-def _run_scan() -> None:
+def _run_scan() -> dict[str, Any]:
     _set_state(
         status="discovering",
         phase="discovering",
@@ -224,6 +225,13 @@ def _run_scan() -> None:
             data_model.refresh_folder_counts(conn)
             conn.commit()
 
+        result = {
+            "count": len(records),
+            "added": added,
+            "updated": updated,
+            "unchanged": unchanged,
+            "deactivated": deactivated,
+        }
         _set_state(
             status="finished",
             phase="finished",
@@ -236,19 +244,20 @@ def _run_scan() -> None:
             deactivated=deactivated,
             finished_at=_now(),
         )
-    except Exception as exc:  # noqa: BLE001
+        return result
+    except Exception as exc:
         _set_state(status="failed", phase="failed", error=f"{type(exc).__name__}: {exc}", finished_at=_now())
+        raise
 
 
 def start_background_scan() -> dict[str, Any]:
-    global _scan_thread
-    should_start = False
-    with _state_lock:
-        if _scan_thread is None or not _scan_thread.is_alive():
-            _scan_thread = threading.Thread(target=_run_scan, name="aoi-dataset-scan", daemon=True)
-            should_start = True
-    if should_start:
-        _scan_thread.start()
+    current = get_scan_status()
+    if current["running"]:
+        return current
+
+    _set_state(status="queued", phase="queued", current_folder=None, error=None)
+    task = worker.submit("scan", _run_scan, dedupe_key="dataset-scan")
+    _set_state(task_id=task["task_id"])
     return get_scan_status()
 
 
