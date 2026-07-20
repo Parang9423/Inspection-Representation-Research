@@ -4,7 +4,8 @@ import re
 
 from fastapi import APIRouter, Query
 
-from .collaboration import connect, ensure_collaboration_schema, serialize
+from .collaboration import serialize
+from .data_model import catalog_select, connect, ensure_normalized_schema
 
 router = APIRouter(prefix="/api/collaboration", tags=["dataset-browser"])
 
@@ -18,37 +19,30 @@ def hotkey_sort_key(item: dict) -> tuple[int, str]:
 
 @router.get("/folders")
 def list_folders() -> dict:
-    """Return source folders and image counts without loading image rows."""
-    ensure_collaboration_schema()
+    """Return the small folder catalog without grouping the image table."""
+    ensure_normalized_schema()
     with connect() as conn:
         rows = conn.execute(
-            """SELECT source_label AS folder_name,
-                      COUNT(*) AS image_count,
-                      SUM(CASE WHEN review_status='reviewed' THEN 1 ELSE 0 END) AS reviewed_count,
-                      SUM(CASE WHEN review_status='reviewing' THEN 1 ELSE 0 END) AS reviewing_count
-               FROM images
-               GROUP BY source_label
-               ORDER BY source_label COLLATE NOCASE"""
+            """SELECT folder_id,folder_name,image_count,reviewed_count,reviewing_count,
+                      last_scanned_at,updated_at
+               FROM folders
+               WHERE image_count > 0
+               ORDER BY folder_name COLLATE NOCASE"""
         ).fetchall()
     return {"items": [dict(row) for row in rows]}
 
 
 @router.get("/hotkeys")
 def list_hotkeys() -> dict:
-    """Build stable class hotkeys from every original class stored in the DB.
-
-    An explicit numeric prefix is preserved. Labels without a prefix receive the
-    next available positive integer so legacy databases still expose hotkeys.
-    """
-    ensure_collaboration_schema()
+    """Build stable class hotkeys from the folder catalog."""
+    ensure_normalized_schema()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT source_label FROM images ORDER BY source_label COLLATE NOCASE"
+            "SELECT folder_name FROM folders WHERE image_count>0 ORDER BY folder_name COLLATE NOCASE"
         ).fetchall()
 
-    labels = [str(row["source_label"] or "").strip() for row in rows]
+    labels = [str(row["folder_name"] or "").strip() for row in rows]
     labels = [label for label in labels if label]
-
     items: list[dict[str, str]] = []
     pending_labels: list[str] = []
     used_keys: set[int] = set()
@@ -58,12 +52,10 @@ def list_hotkeys() -> dict:
         if not match:
             pending_labels.append(label)
             continue
-
         numeric_key = int(match.group(1))
         if numeric_key <= 0 or numeric_key in used_keys:
             pending_labels.append(label)
             continue
-
         used_keys.add(numeric_key)
         items.append({"key": str(numeric_key), "label": label})
 
@@ -86,22 +78,30 @@ def list_folder_images(
     page_size: int = Query(48, ge=1, le=200),
     search: str | None = None,
 ) -> dict:
-    """Load only images belonging to the selected original source folder."""
-    ensure_collaboration_schema()
-    where = ["source_label=?"]
+    """Load only one page of image paths and annotation state for a folder."""
+    ensure_normalized_schema()
+    where = ["i.is_active=1", "f.folder_name=?"]
     params: list[object] = [source_label]
     if search:
-        where.append("(filename LIKE ? OR label LIKE ?)")
+        where.append("(i.filename LIKE ? OR COALESCE(a.current_label,i.original_label,f.folder_name) LIKE ?)")
         term = f"%{search}%"
         params.extend([term, term])
     clause = " AND ".join(where)
     offset = (page - 1) * page_size
+
     with connect() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM images WHERE {clause}", params).fetchone()[0]
+        total = conn.execute(
+            """SELECT COUNT(*) FROM images i
+               JOIN folders f ON f.folder_id=i.folder_id
+               LEFT JOIN image_annotations a ON a.image_id=i.image_id
+               WHERE """ + clause,
+            params,
+        ).fetchone()[0]
         rows = conn.execute(
-            f"SELECT * FROM images WHERE {clause} ORDER BY filename COLLATE NOCASE LIMIT ? OFFSET ?",
+            catalog_select() + f" WHERE {clause} ORDER BY i.filename COLLATE NOCASE LIMIT ? OFFSET ?",
             [*params, page_size, offset],
         ).fetchall()
+
     return {
         "items": [serialize(row) for row in rows],
         "total": total,
