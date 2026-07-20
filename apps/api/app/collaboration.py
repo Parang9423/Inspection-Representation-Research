@@ -8,7 +8,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .main import BACKUP_ROOT, DATA_ROOT, DB_PATH
+from .main import BACKUP_ROOT, DATA_ROOT
+from .data_model import catalog_select, connect, ensure_normalized_schema, iso_now, refresh_folder_counts
 
 router = APIRouter(prefix="/api/collaboration", tags=["collaboration"])
 LOCK_TTL_SECONDS = 600
@@ -36,54 +37,8 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def iso_now() -> str:
-    return utc_now().isoformat(timespec="seconds")
-
-
-def connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
 def ensure_collaboration_schema() -> None:
-    with connect() as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='images'"
-        ).fetchone()
-        if not table:
-            return
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(images)").fetchall()}
-        additions = {
-            "version": "INTEGER NOT NULL DEFAULT 1",
-            "assigned_to": "TEXT",
-            "review_status": "TEXT NOT NULL DEFAULT 'unreviewed'",
-            "reviewed_by": "TEXT",
-            "reviewed_at": "TEXT",
-            "locked_by": "TEXT",
-            "locked_at": "TEXT",
-        }
-        for name, ddl in additions.items():
-            if name not in columns:
-                conn.execute(f"ALTER TABLE images ADD COLUMN {name} {ddl}")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS label_history (
-                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_id TEXT NOT NULL,
-                previous_label TEXT,
-                new_label TEXT,
-                changed_by TEXT NOT NULL,
-                changed_at TEXT NOT NULL,
-                previous_version INTEGER NOT NULL,
-                new_version INTEGER NOT NULL
-            )"""
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_images_locked_by ON images(locked_by)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_history_image ON label_history(image_id)")
+    ensure_normalized_schema()
 
 
 def lock_expired(row: sqlite3.Row) -> bool:
@@ -106,32 +61,24 @@ def serialize(row: sqlite3.Row) -> dict:
     return item
 
 
+def fetch_image(conn: sqlite3.Connection, image_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        catalog_select() + " WHERE i.image_id=? AND i.is_active=1", (image_id,)
+    ).fetchone()
+
+
 def editable_or_raise(row: sqlite3.Row, actor: str, expected_version: int) -> None:
     if row["locked_by"] and not lock_expired(row) and row["locked_by"] != actor:
-        raise HTTPException(
-            status_code=423,
-            detail={
-                "code": "locked",
-                "message": f"{row['locked_by']}님이 검수 중입니다.",
-                "item": serialize(row),
-            },
-        )
+        raise HTTPException(423, {"code": "locked", "message": f"{row['locked_by']}님이 검수 중입니다.", "item": serialize(row)})
     if row["version"] != expected_version:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "version_conflict",
-                "message": "다른 작업자가 이미 수정했습니다.",
-                "item": serialize(row),
-            },
-        )
+        raise HTTPException(409, {"code": "version_conflict", "message": "다른 작업자가 이미 수정했습니다.", "item": serialize(row)})
 
 
 @router.get("/images/{image_id}")
 def get_image(image_id: str) -> dict:
-    ensure_collaboration_schema()
+    ensure_normalized_schema()
     with connect() as conn:
-        row = conn.execute("SELECT * FROM images WHERE image_id=?", (image_id,)).fetchone()
+        row = fetch_image(conn, image_id)
     if not row:
         raise HTTPException(404, "이미지를 찾을 수 없습니다.")
     return serialize(row)
@@ -139,10 +86,10 @@ def get_image(image_id: str) -> dict:
 
 @router.get("/images/{image_id}/history")
 def get_history(image_id: str) -> dict:
-    ensure_collaboration_schema()
+    ensure_normalized_schema()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM label_history WHERE image_id=? ORDER BY history_id DESC LIMIT 100",
+            "SELECT * FROM annotation_history WHERE image_id=? ORDER BY history_id DESC LIMIT 100",
             (image_id,),
         ).fetchall()
     return {"items": [dict(row) for row in rows]}
@@ -150,116 +97,114 @@ def get_history(image_id: str) -> dict:
 
 @router.post("/images/{image_id}/lock")
 def acquire_lock(image_id: str, request: ActorRequest) -> dict:
-    ensure_collaboration_schema()
+    ensure_normalized_schema()
     now = iso_now()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM images WHERE image_id=?", (image_id,)).fetchone()
+        row = fetch_image(conn, image_id)
         if not row:
             raise HTTPException(404, "이미지를 찾을 수 없습니다.")
         if row["locked_by"] and not lock_expired(row) and row["locked_by"] != request.actor:
-            raise HTTPException(
-                423,
-                {
-                    "code": "locked",
-                    "message": f"{row['locked_by']}님이 검수 중입니다.",
-                    "item": serialize(row),
-                },
-            )
+            raise HTTPException(423, {"code": "locked", "message": f"{row['locked_by']}님이 검수 중입니다.", "item": serialize(row)})
         conn.execute(
-            """UPDATE images
-               SET locked_by=?, locked_at=?, assigned_to=?, review_status='reviewing'
-               WHERE image_id=?""",
-            (request.actor, now, request.actor, image_id),
+            """INSERT INTO image_annotations(image_id,current_label,review_status,assigned_to,version,locked_by,locked_at,updated_at)
+               VALUES(?,?,'reviewing',?,1,?,?,?)
+               ON CONFLICT(image_id) DO UPDATE SET assigned_to=excluded.assigned_to,
+               review_status='reviewing',locked_by=excluded.locked_by,locked_at=excluded.locked_at,updated_at=excluded.updated_at""",
+            (image_id, row["label"], request.actor, request.actor, now, now),
         )
-        updated = conn.execute("SELECT * FROM images WHERE image_id=?", (image_id,)).fetchone()
+        refresh_folder_counts(conn)
+        updated = fetch_image(conn, image_id)
     return serialize(updated)
 
 
 @router.post("/images/{image_id}/unlock")
 def release_lock(image_id: str, request: ActorRequest) -> dict:
-    ensure_collaboration_schema()
+    ensure_normalized_schema()
     with connect() as conn:
         conn.execute(
-            """UPDATE images
-               SET locked_by=NULL, locked_at=NULL,
-                   review_status=CASE WHEN review_status='reviewing' THEN 'unreviewed' ELSE review_status END
-               WHERE image_id=? AND locked_by=?""",
-            (image_id, request.actor),
+            """UPDATE image_annotations SET locked_by=NULL,locked_at=NULL,
+               review_status=CASE WHEN review_status='reviewing' THEN 'unreviewed' ELSE review_status END,
+               updated_at=? WHERE image_id=? AND locked_by=?""",
+            (iso_now(), image_id, request.actor),
         )
+        refresh_folder_counts(conn)
     return {"released": True}
 
 
 @router.post("/images/{image_id}/heartbeat")
 def heartbeat(image_id: str, request: ActorRequest) -> dict:
-    ensure_collaboration_schema()
+    ensure_normalized_schema()
     with connect() as conn:
         cursor = conn.execute(
-            "UPDATE images SET locked_at=? WHERE image_id=? AND locked_by=?",
-            (iso_now(), image_id, request.actor),
+            "UPDATE image_annotations SET locked_at=?,updated_at=? WHERE image_id=? AND locked_by=?",
+            (iso_now(), iso_now(), image_id, request.actor),
         )
     return {"renewed": cursor.rowcount == 1}
 
 
 @router.patch("/images/update")
 def update_image(request: UpdateRequest) -> dict:
-    ensure_collaboration_schema()
+    ensure_normalized_schema()
     if request.label is None and request.split is None:
         raise HTTPException(400, "변경할 값이 없습니다.")
     now = iso_now()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM images WHERE image_id=?", (request.image_id,)).fetchone()
+        row = fetch_image(conn, request.image_id)
         if not row:
             raise HTTPException(404, "이미지를 찾을 수 없습니다.")
         editable_or_raise(row, request.actor, request.expected_version)
-        previous_label = row["label"]
         new_version = row["version"] + 1
-        fields = [
-            "updated_at=?",
-            "version=?",
-            "reviewed_by=?",
-            "reviewed_at=?",
-            "review_status='reviewed'",
-            "assigned_to=?",
-            "locked_by=NULL",
-            "locked_at=NULL",
-        ]
-        values: list[object] = [now, new_version, request.actor, now, request.actor]
+
         if request.label is not None:
-            fields.insert(0, "label=?")
-            values.insert(0, request.label)
-        if request.split is not None:
-            fields.insert(0, "split=?")
-            values.insert(0, request.split)
-        values.append(request.image_id)
-        conn.execute(f"UPDATE images SET {', '.join(fields)} WHERE image_id=?", values)
-        if request.label is not None and request.label != previous_label:
             conn.execute(
-                """INSERT INTO label_history (
-                    image_id,previous_label,new_label,changed_by,changed_at,
-                    previous_version,new_version
-                ) VALUES (?,?,?,?,?,?,?)""",
-                (
-                    request.image_id,
-                    previous_label,
-                    request.label,
-                    request.actor,
-                    now,
-                    row["version"],
-                    new_version,
-                ),
+                """INSERT INTO image_annotations(image_id,current_label,review_status,assigned_to,reviewed_by,
+                   reviewed_at,version,locked_by,locked_at,updated_at)
+                   VALUES(?,?,'reviewed',?,?,?, ?,NULL,NULL,?)
+                   ON CONFLICT(image_id) DO UPDATE SET current_label=excluded.current_label,
+                   review_status='reviewed',assigned_to=excluded.assigned_to,reviewed_by=excluded.reviewed_by,
+                   reviewed_at=excluded.reviewed_at,version=excluded.version,locked_by=NULL,locked_at=NULL,
+                   updated_at=excluded.updated_at""",
+                (request.image_id, request.label, request.actor, request.actor, now, new_version, now),
             )
-        updated = conn.execute("SELECT * FROM images WHERE image_id=?", (request.image_id,)).fetchone()
+            if request.label != row["label"]:
+                conn.execute(
+                    """INSERT INTO annotation_history(image_id,previous_label,new_label,changed_by,
+                       changed_at,previous_version,new_version) VALUES(?,?,?,?,?,?,?)""",
+                    (request.image_id, row["label"], request.label, request.actor, now, row["version"], new_version),
+                )
+        else:
+            conn.execute(
+                """UPDATE image_annotations SET review_status='reviewed',assigned_to=?,reviewed_by=?,
+                   reviewed_at=?,version=?,locked_by=NULL,locked_at=NULL,updated_at=? WHERE image_id=?""",
+                (request.actor, request.actor, now, new_version, now, request.image_id),
+            )
+
+        if request.split is not None:
+            previous_split = row["split"]
+            conn.execute(
+                """INSERT INTO split_assignments(image_id,split_set,assigned_by,assigned_at)
+                   VALUES(?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET split_set=excluded.split_set,
+                   assigned_by=excluded.assigned_by,assigned_at=excluded.assigned_at,split_version=split_version+1""",
+                (request.image_id, request.split, request.actor, now),
+            )
+            if request.split != previous_split:
+                conn.execute(
+                    "INSERT INTO split_history(image_id,previous_split,new_split,changed_by,changed_at) VALUES(?,?,?,?,?)",
+                    (request.image_id, previous_split, request.split, request.actor, now),
+                )
+        refresh_folder_counts(conn)
+        updated = fetch_image(conn, request.image_id)
     return serialize(updated)
 
 
 @router.post("/images/backup-delete")
 def backup_delete(request: DeleteRequest) -> dict:
-    ensure_collaboration_schema()
+    ensure_normalized_schema()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM images WHERE image_id=?", (request.image_id,)).fetchone()
+        row = fetch_image(conn, request.image_id)
         if not row:
             raise HTTPException(404, "이미지를 찾을 수 없습니다.")
         editable_or_raise(row, request.actor, request.expected_version)
@@ -274,5 +219,6 @@ def backup_delete(request: DeleteRequest) -> dict:
             if target.exists():
                 target = target.with_name(f"{target.stem}_{datetime.now():%Y%m%d%H%M%S}{target.suffix}")
             shutil.move(str(source), str(target))
-        conn.execute("DELETE FROM images WHERE image_id=?", (request.image_id,))
+        conn.execute("UPDATE images SET is_active=0,updated_at=? WHERE image_id=?", (iso_now(), request.image_id))
+        refresh_folder_counts(conn)
     return {"moved": 1}
