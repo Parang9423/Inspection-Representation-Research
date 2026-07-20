@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Progress, Space, Tag, Typography, message } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
@@ -5,8 +6,10 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api' })
 
+type ScanStatusCode = 'idle' | 'discovering' | 'running' | 'finished' | 'failed'
+
 interface ScanStatus {
-  status: 'idle' | 'discovering' | 'running' | 'finished' | 'failed'
+  status: ScanStatusCode
   phase: string
   running: boolean
   current_folder?: string | null
@@ -33,11 +36,15 @@ async function startScan() {
 
 export default function ScanStatusBanner() {
   const queryClient = useQueryClient()
+  const previousStatus = useRef<ScanStatusCode>('idle')
+
   const scan = useQuery({
     queryKey: ['scan-status'],
     queryFn: fetchScanStatus,
     refetchInterval: (query) => query.state.data?.running ? 1000 : 5000,
+    refetchIntervalInBackground: true,
   })
+
   const start = useMutation({
     mutationFn: startScan,
     onSuccess: async () => {
@@ -48,6 +55,24 @@ export default function ScanStatusBanner() {
   })
 
   const status = scan.data
+
+  useEffect(() => {
+    if (!status) return
+
+    const previous = previousStatus.current
+    previousStatus.current = status.status
+
+    if (status.status === 'finished' && previous !== 'finished') {
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['dataset-folders'] }),
+        queryClient.invalidateQueries({ queryKey: ['folder-images'] }),
+        queryClient.invalidateQueries({ queryKey: ['hotkeys'] }),
+        queryClient.invalidateQueries({ queryKey: ['summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['split-images'] }),
+      ])
+    }
+  }, [status, queryClient])
+
   if (!status || status.status === 'idle') return null
 
   if (status.status === 'failed') {
