@@ -6,7 +6,7 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api' })
 
-type ScanStatusCode = 'idle' | 'discovering' | 'running' | 'finished' | 'failed'
+type ScanStatusCode = 'idle' | 'queued' | 'discovering' | 'running' | 'finished' | 'failed'
 
 interface ScanStatus {
   status: ScanStatusCode
@@ -49,7 +49,7 @@ export default function ScanStatusBanner() {
     mutationFn: startScan,
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['scan-status'] })
-      message.info('폴더 동기화를 백그라운드에서 시작했습니다.')
+      message.info('폴더 동기화를 백그라운드 작업 큐에 등록했습니다.')
     },
     onError: () => message.error('폴더 동기화를 시작하지 못했습니다.'),
   })
@@ -84,6 +84,18 @@ export default function ScanStatusBanner() {
         message="데이터셋 인덱싱 실패"
         description={status.error ?? 'API 로그를 확인하세요.'}
         action={<Button icon={<ReloadOutlined />} loading={start.isPending} onClick={() => start.mutate()}>다시 시도</Button>}
+      />
+    )
+  }
+
+  if (status.status === 'queued') {
+    return (
+      <Alert
+        className="scan-status-banner"
+        type="info"
+        showIcon
+        message="데이터셋 인덱싱 대기 중"
+        description="초기 DB 마이그레이션 또는 앞선 파일 작업이 끝나면 자동으로 시작됩니다. API와 UI는 계속 사용할 수 있습니다."
       />
     )
   }
