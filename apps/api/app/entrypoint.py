@@ -1,6 +1,7 @@
 from . import main as main_module
 from .collaboration import router as collaboration_router
 from .collaboration_summary import router as collaboration_summary_router
+from .compatibility import ensure_compatibility_triggers
 from .data_model import ensure_normalized_schema, router as normalized_router, scan_catalog
 from .dataset_browser import list_hotkeys, router as dataset_browser_router
 
@@ -34,6 +35,7 @@ app.include_router(dataset_browser_router)
 def initialize_application() -> None:
     main_module.init_db()
     ensure_normalized_schema()
+    ensure_compatibility_triggers()
 
     # Only the first run scans the source tree. Existing DB content is served immediately.
     with main_module.connect() as conn:
