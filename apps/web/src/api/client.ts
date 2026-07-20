@@ -22,7 +22,25 @@ export async function bulkUpdate(payload: {
   status?: StatusCode
   note?: string
 }) {
-  return (await api.patch('/images/bulk', payload)).data
+  const activeElement = document.activeElement as HTMLInputElement | null
+  const submittedFromHotkey = Boolean(
+    payload.label
+      && payload.image_ids.length === 1
+      && activeElement?.getAttribute('placeholder') === '예: 1',
+  )
+
+  const result = (await api.patch('/images/bulk', payload)).data
+
+  if (submittedFromHotkey) {
+    window.setTimeout(() => {
+      const nextButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent?.trim() === '다음' && !button.disabled,
+      )
+      nextButton?.click()
+    }, 0)
+  }
+
+  return result
 }
 
 export async function backupDelete(payload: { image_ids: string[] }) {
