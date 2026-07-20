@@ -10,18 +10,14 @@ app = main_module.app
 if main_module.startup in app.router.on_startup:
     app.router.on_startup.remove(main_module.startup)
 
-# 기존 핫키 API는 실제 파일 시스템을 매번 조회합니다. 폴더 우선 탐색 구조에서는
-# DB에 저장된 전체 source_label을 기준으로 핫키를 만들어야 하므로 기존 경로를 교체합니다.
-app.router.routes = [
-    route for route in app.router.routes
-    if getattr(route, "path", None) != "/api/labels/hotkeys"
-]
+# 기존 /api/labels/hotkeys 라우트는 main.py의 label_hotkeys()를 호출합니다.
+# 라우트 자체를 제거/재등록하지 않고 함수 참조를 DB 기반 구현으로 교체하면
+# FastAPI 라우트 등록 순서와 관계없이 항상 동일한 핫키 목록을 반환합니다.
+def database_label_hotkeys() -> list[dict[str, str]]:
+    return list_hotkeys()["items"]
 
 
-@app.get("/api/labels/hotkeys")
-def cached_label_hotkeys() -> dict:
-    return list_hotkeys()
-
+main_module.label_hotkeys = database_label_hotkeys
 
 app.include_router(collaboration_router)
 app.include_router(collaboration_summary_router)
