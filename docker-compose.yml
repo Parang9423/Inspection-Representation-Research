@@ -4,10 +4,12 @@ services:
     environment:
       AOI_DATA_ROOT: /data/split_image
       AOI_CAM_ROOT: /data/cam_image
-      AOI_EXPORT_ROOT: /data/exports
-      AOI_DB_PATH: /data/dataset_manager.db
+      AOI_EXPORT_ROOT: /state/exports
+      AOI_DB_PATH: /state/dataset_manager.db
     volumes:
-      - ./data:/data
+      - ${AOI_IMAGE_DIR:-./split_image}:/data/split_image:ro
+      - ${AOI_CAM_DIR:-./cam_image}:/data/cam_image:ro
+      - ./data:/state
     restart: unless-stopped
   web:
     build: ./apps/web
