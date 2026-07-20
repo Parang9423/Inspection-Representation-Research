@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Query
 
 from .collaboration import connect, ensure_collaboration_schema, serialize
 
 router = APIRouter(prefix="/api/collaboration", tags=["dataset-browser"])
+
+
+def hotkey_sort_key(item: dict) -> tuple[int, str]:
+    try:
+        return int(item["key"]), item["label"].lower()
+    except (TypeError, ValueError):
+        return 10**9, item["label"].lower()
 
 
 @router.get("/folders")
@@ -22,6 +31,36 @@ def list_folders() -> dict:
                ORDER BY source_label COLLATE NOCASE"""
         ).fetchall()
     return {"items": [dict(row) for row in rows]}
+
+
+@router.get("/hotkeys")
+def list_hotkeys() -> dict:
+    """Build class hotkeys from all original folders stored in the database.
+
+    This remains stable even when the UI is browsing one folder at a time or the
+    source volume is temporarily slow to enumerate.
+    """
+    ensure_collaboration_schema()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT source_label FROM images ORDER BY source_label COLLATE NOCASE"
+        ).fetchall()
+
+    items: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    for row in rows:
+        label = str(row["source_label"] or "").strip()
+        match = re.match(r"^\s*(\d+)\s*[_\-. ]*", label)
+        if not match:
+            continue
+        key = match.group(1)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        items.append({"key": key, "label": label})
+
+    items.sort(key=hotkey_sort_key)
+    return {"items": items}
 
 
 @router.get("/folder-images")
