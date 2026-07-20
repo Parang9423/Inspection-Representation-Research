@@ -7,6 +7,7 @@ from .data_model import router as normalized_router
 from .dataset_browser import list_hotkeys, router as dataset_browser_router
 from .scan_manager import router as scan_router, start_background_scan
 from .schema_runtime import ensure_schema_ready, install_schema_guard
+from .task_worker import worker
 
 app = main_module.app
 
@@ -43,14 +44,11 @@ app.include_router(collaboration_summary_router)
 app.include_router(dataset_browser_router)
 
 
-@app.on_event("startup")
-def initialize_application() -> None:
-    main_module.init_db()
+def initialize_catalog_task() -> dict:
+    """Initialize/migrate the catalog outside the ASGI startup lifecycle."""
     ensure_schema_ready()
     ensure_compatibility_triggers()
 
-    # The API becomes available immediately. A missing/empty catalog is indexed
-    # by a daemon thread while the UI polls /api/scan/status.
     with main_module.connect() as conn:
         image_count = conn.execute(
             "SELECT COUNT(*) FROM images WHERE COALESCE(is_active,1)=1"
@@ -58,3 +56,18 @@ def initialize_application() -> None:
 
     if image_count == 0:
         start_background_scan()
+
+    return {"catalog_ready": True, "image_count": int(image_count)}
+
+
+@app.on_event("startup")
+def initialize_application() -> None:
+    # Keep startup deterministic and short: create the legacy base DB, start the
+    # worker, enqueue catalog initialization, then immediately let Uvicorn bind.
+    main_module.init_db()
+    worker.start()
+    worker.submit(
+        "catalog-initialize",
+        initialize_catalog_task,
+        dedupe_key="catalog-initialize",
+    )
