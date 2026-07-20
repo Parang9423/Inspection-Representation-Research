@@ -35,10 +35,10 @@ def list_folders() -> dict:
 
 @router.get("/hotkeys")
 def list_hotkeys() -> dict:
-    """Build class hotkeys from all original folders stored in the database.
+    """Build stable class hotkeys from every original class stored in the DB.
 
-    This remains stable even when the UI is browsing one folder at a time or the
-    source volume is temporarily slow to enumerate.
+    An explicit numeric prefix is preserved. Labels without a prefix receive the
+    next available positive integer so legacy databases still expose hotkeys.
     """
     ensure_collaboration_schema()
     with connect() as conn:
@@ -46,18 +46,34 @@ def list_hotkeys() -> dict:
             "SELECT DISTINCT source_label FROM images ORDER BY source_label COLLATE NOCASE"
         ).fetchall()
 
+    labels = [str(row["source_label"] or "").strip() for row in rows]
+    labels = [label for label in labels if label]
+
     items: list[dict[str, str]] = []
-    seen_keys: set[str] = set()
-    for row in rows:
-        label = str(row["source_label"] or "").strip()
+    pending_labels: list[str] = []
+    used_keys: set[int] = set()
+
+    for label in labels:
         match = re.match(r"^\s*(\d+)\s*[_\-. ]*", label)
         if not match:
+            pending_labels.append(label)
             continue
-        key = match.group(1)
-        if key in seen_keys:
+
+        numeric_key = int(match.group(1))
+        if numeric_key <= 0 or numeric_key in used_keys:
+            pending_labels.append(label)
             continue
-        seen_keys.add(key)
-        items.append({"key": key, "label": label})
+
+        used_keys.add(numeric_key)
+        items.append({"key": str(numeric_key), "label": label})
+
+    next_key = 1
+    for label in pending_labels:
+        while next_key in used_keys:
+            next_key += 1
+        used_keys.add(next_key)
+        items.append({"key": str(next_key), "label": label})
+        next_key += 1
 
     items.sort(key=hotkey_sort_key)
     return {"items": items}
