@@ -1,40 +1,33 @@
-import sqlite3
-
 from fastapi import APIRouter
 
-from .main import DB_PATH
-from .collaboration import ensure_collaboration_schema
+from .data_model import catalog_select, connect, ensure_normalized_schema
 
 router = APIRouter(prefix="/api/collaboration", tags=["collaboration"])
 
 
 @router.get("/summary")
 def collaboration_summary() -> dict:
-    ensure_collaboration_schema()
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    try:
-        totals = conn.execute(
-            """SELECT COUNT(*) total,
-               SUM(status='included') included,
-               SUM(status='review') review,
-               SUM(status='excluded') excluded,
-               SUM(split!='unassigned') assigned,
-               SUM(status='included' AND split='unassigned') unassigned,
-               SUM(review_status='reviewed') reviewed,
-               SUM(review_status='reviewing') reviewing
-               FROM images"""
-        ).fetchone()
-        classes = conn.execute(
-            """SELECT label,
-               SUM(split='train' AND status='included') train,
-               SUM(split='valid' AND status='included') valid,
-               SUM(split='test' AND status='included') test,
-               SUM(split='unassigned' AND status='included') unassigned,
-               COUNT(*) total
-               FROM images GROUP BY label ORDER BY total DESC"""
-        ).fetchall()
-        return {"totals": dict(totals), "classes": [dict(row) for row in classes]}
-    finally:
-        conn.close()
+    ensure_normalized_schema()
+    with connect() as conn:
+        base = catalog_select() + " WHERE i.is_active=1"
+        rows = conn.execute(base).fetchall()
+
+    totals = {
+        "total": len(rows),
+        "included": sum(row["status"] == "included" for row in rows),
+        "review": sum(row["status"] == "review" for row in rows),
+        "excluded": sum(row["status"] == "excluded" for row in rows),
+        "assigned": sum(row["split"] != "unassigned" for row in rows),
+        "unassigned": sum(row["status"] == "included" and row["split"] == "unassigned" for row in rows),
+        "reviewed": sum(row["review_status"] == "reviewed" for row in rows),
+        "reviewing": sum(row["review_status"] == "reviewing" for row in rows),
+    }
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        label = row["label"]
+        item = grouped.setdefault(label, {"label": label, "train": 0, "valid": 0, "test": 0, "unassigned": 0, "total": 0})
+        item["total"] += 1
+        if row["status"] == "included":
+            item[row["split"]] = item.get(row["split"], 0) + 1
+    classes = sorted(grouped.values(), key=lambda item: item["total"], reverse=True)
+    return {"totals": totals, "classes": classes}
