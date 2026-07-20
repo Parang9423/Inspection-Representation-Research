@@ -5,6 +5,7 @@ from .collaboration_summary import router as collaboration_summary_router
 from .compatibility import ensure_compatibility_triggers
 from .data_model import router as normalized_router
 from .dataset_browser import list_hotkeys, router as dataset_browser_router
+from .export_manager import router as export_router
 from .scan_manager import router as scan_router, start_background_scan
 from .schema_runtime import ensure_schema_ready, install_schema_guard
 from .task_worker import worker
@@ -23,7 +24,7 @@ app.router.routes = [
 ]
 normalized_router.routes = [
     route for route in normalized_router.routes
-    if getattr(route, "path", None) != "/api/scan"
+    if getattr(route, "path", None) not in {"/api/scan", "/api/exports"}
 ]
 
 
@@ -39,6 +40,7 @@ collaboration_module.ensure_normalized_schema = ensure_schema_ready
 
 app.include_router(normalized_router)
 app.include_router(scan_router)
+app.include_router(export_router)
 app.include_router(collaboration_router)
 app.include_router(collaboration_summary_router)
 app.include_router(dataset_browser_router)
