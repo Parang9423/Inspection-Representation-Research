@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { InputRef } from 'antd'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Alert, Button, Card, Col, Empty, Form, Image, Input, Modal, Pagination,
-  Popconfirm, Progress, Row, Select, Space, Statistic, Table, Tag, Typography, message,
+  Alert, Button, Card, Checkbox, Col, Empty, Form, Image, Input, Modal,
+  Pagination, Popconfirm, Progress, Row, Select, Space, Statistic, Table,
+  Tag, Typography, message,
 } from 'antd'
 import {
-  ArrowLeftOutlined, CheckCircleOutlined, DeleteOutlined, FolderOpenOutlined,
-  FolderOutlined, LeftOutlined, LockOutlined, ReloadOutlined, RightOutlined,
-  StopOutlined, SyncOutlined,
+  ArrowLeftOutlined, CheckCircleOutlined, DeleteOutlined, FileSearchOutlined,
+  FolderOpenOutlined, FolderOutlined, HistoryOutlined, LeftOutlined,
+  LockOutlined, ReloadOutlined, RightOutlined, StopOutlined, SyncOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 
@@ -25,6 +26,7 @@ interface FolderItem {
   work_status: FolderWorkStatus
   working_by?: string | null
   working_at?: string | null
+  heartbeat_at?: string | null
   progress: number
 }
 
@@ -44,6 +46,15 @@ interface ImageItem {
   reviewed_at?: string | null
   locked_by?: string | null
   locked_at?: string | null
+}
+
+interface WorkLog {
+  log_id: number
+  folder_name?: string | null
+  actor?: string | null
+  action: string
+  detail?: string | null
+  created_at: string
 }
 
 async function fetchFolders() {
@@ -67,6 +78,12 @@ async function releaseFolder(folder: string, actor: string, force = false) {
 async function completeFolder(folder: string, actor: string) {
   return (await api.post(`/folder-work/folders/${encodeURIComponent(folder)}/complete`, { actor })).data
 }
+async function folderHeartbeat(folder: string, actor: string) {
+  return (await api.post(`/folder-work/folders/${encodeURIComponent(folder)}/heartbeat`, { actor })).data
+}
+async function fetchWorkLogs(folder?: string) {
+  return (await api.get<{ items: WorkLog[] }>('/folder-work/logs', { params: { folder_name: folder, limit: 100 } })).data
+}
 async function fetchHistory(imageId: string) {
   return (await api.get<{ items: Array<Record<string, unknown>> }>(`/collaboration/images/${imageId}/history`)).data
 }
@@ -76,7 +93,7 @@ async function acquireLock(imageId: string, actor: string) {
 async function releaseLock(imageId: string, actor: string) {
   return (await api.post(`/collaboration/images/${imageId}/unlock`, { actor })).data
 }
-async function heartbeat(imageId: string, actor: string) {
+async function imageHeartbeat(imageId: string, actor: string) {
   return (await api.post(`/collaboration/images/${imageId}/heartbeat`, { actor })).data
 }
 async function updateImage(payload: { image_id: string; actor: string; expected_version: number; label: string }) {
@@ -91,6 +108,15 @@ const folderStatusMeta: Record<FolderWorkStatus, { label: string; color: string 
   working: { label: '작업중', color: 'orange' },
   completed: { label: '완료', color: 'green' },
 }
+const reviewOptions = [
+  { value: 'unreviewed', label: '미검수' },
+  { value: 'reviewing', label: '작업중' },
+  { value: 'reviewed', label: '완료' },
+]
+const actionLabels: Record<string, string> = {
+  start: '작업 시작', release: '작업 해제', force_release: '강제 해제',
+  complete: '작업 완료', auto_release: '자동 해제',
+}
 
 export default function FolderDatasetGrid({ worker }: { worker: string }) {
   const qc = useQueryClient()
@@ -98,35 +124,63 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
+  const [reviewFilter, setReviewFilter] = useState<ReviewStatus | undefined>()
+  const [mineOnly, setMineOnly] = useState(false)
+  const [changedOnly, setChangedOnly] = useState(false)
   const [detail, setDetail] = useState<ImageItem | null>(null)
   const [hotkeyOpen, setHotkeyOpen] = useState(false)
   const [hotkeyValue, setHotkeyValue] = useState('')
   const [nextImageId, setNextImageId] = useState<string | null>(null)
+  const [logsOpen, setLogsOpen] = useState(false)
 
-  const folders = useQuery({ queryKey: ['dataset-folders'], queryFn: fetchFolders, refetchInterval: 5000 })
+  const folders = useQuery({
+    queryKey: ['dataset-folders'], queryFn: fetchFolders, refetchInterval: 5000,
+  })
+  const imageQueryKey = [
+    'folder-images', selectedFolder, page, search, reviewFilter, mineOnly, changedOnly,
+  ]
   const images = useQuery({
-    queryKey: ['folder-images', selectedFolder, page, search],
-    queryFn: () => fetchFolderImages({ source_label: selectedFolder, page, page_size: 48, search: search || undefined }),
+    queryKey: imageQueryKey,
+    queryFn: () => fetchFolderImages({
+      source_label: selectedFolder,
+      page,
+      page_size: 48,
+      search: search || undefined,
+      review_status: reviewFilter,
+      actor: mineOnly ? worker : undefined,
+      changed_only: changedOnly || undefined,
+    }),
     enabled: !!selectedFolder,
     refetchInterval: selectedFolder && !hotkeyOpen ? 5000 : false,
   })
   const hotkeys = useQuery({ queryKey: ['hotkeys'], queryFn: fetchHotkeys, staleTime: 30000 })
   const history = useQuery({
     queryKey: ['history', detail?.image_id],
-    queryFn: () => fetchHistory(detail!.image_id), enabled: !!detail, refetchInterval: detail ? 5000 : false,
+    queryFn: () => fetchHistory(detail!.image_id),
+    enabled: !!detail,
+    refetchInterval: detail ? 5000 : false,
+  })
+  const logs = useQuery({
+    queryKey: ['folder-work-logs', selectedFolder],
+    queryFn: () => fetchWorkLogs(selectedFolder ?? undefined),
+    enabled: logsOpen,
   })
 
   const items = images.data?.items ?? []
   const folderItems = folders.data?.items ?? []
   const selectedFolderInfo = folderItems.find((item) => item.folder_name === selectedFolder)
   const detailIndex = detail ? items.findIndex((item) => item.image_id === detail.image_id) : -1
-  const hotkeyMap = useMemo(() => new Map((hotkeys.data?.items ?? []).map((item) => [item.key, item.label])), [hotkeys.data])
+  const hotkeyMap = useMemo(
+    () => new Map((hotkeys.data?.items ?? []).map((item) => [item.key, item.label])),
+    [hotkeys.data],
+  )
 
   const refresh = async () => {
     await Promise.all([
       qc.invalidateQueries({ queryKey: ['dataset-folders'] }),
       qc.invalidateQueries({ queryKey: ['folder-images'] }),
       qc.invalidateQueries({ queryKey: ['history'] }),
+      qc.invalidateQueries({ queryKey: ['folder-work-logs'] }),
       qc.invalidateQueries({ queryKey: ['summary'] }),
     ])
   }
@@ -146,18 +200,22 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
     onSuccess: async () => { await refresh(); message.success('폴더 작업을 완료 처리했습니다.') },
   })
 
+  const resetFilters = () => {
+    setReviewFilter(undefined); setMineOnly(false); setChangedOnly(false); setPage(1)
+  }
   const openFolder = async (folder: FolderItem) => {
     try {
       if (folder.work_status !== 'completed' && (!folder.working_by || folder.working_by === worker)) {
         await folderStart.mutateAsync({ folder: folder.folder_name, actor: worker })
       }
-    } catch { /* 읽기 전용 진입 허용 */ }
+    } catch { /* read-only entry */ }
     setSelectedFolder(folder.folder_name)
-    setPage(1); setSearch(''); setDetail(null)
+    setPage(1); setSearch(''); setDetail(null); resetFilters()
   }
-
   const openDetail = async (item: ImageItem) => {
-    if (detail?.locked_by === worker && detail.image_id !== item.image_id) await releaseLock(detail.image_id, worker).catch(() => undefined)
+    if (detail?.locked_by === worker && detail.image_id !== item.image_id) {
+      await releaseLock(detail.image_id, worker).catch(() => undefined)
+    }
     try { setDetail(await acquireLock(item.image_id, worker)) }
     catch (error: any) {
       const payload = error?.response?.data?.detail
@@ -169,15 +227,21 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
     if (detail?.locked_by === worker) await releaseLock(detail.image_id, worker).catch(() => undefined)
     setDetail(null)
   }
-  const leaveFolder = async () => { await closeDetail(); setSelectedFolder(null); setPage(1); setSearch('') }
+  const leaveFolder = async () => {
+    await closeDetail(); setSelectedFolder(null); setPage(1); setSearch(''); resetFilters()
+  }
 
   const update = useMutation({
     mutationFn: updateImage,
     onSuccess: async (updated) => {
       await refresh()
       if (nextImageId) {
-        const refreshed = await fetchFolderImages({ source_label: selectedFolder, page, page_size: 48, search: search || undefined })
-        qc.setQueryData(['folder-images', selectedFolder, page, search], refreshed)
+        const refreshed = await fetchFolderImages({
+          source_label: selectedFolder, page, page_size: 48, search: search || undefined,
+          review_status: reviewFilter, actor: mineOnly ? worker : undefined,
+          changed_only: changedOnly || undefined,
+        })
+        qc.setQueryData(imageQueryKey, refreshed)
         const next = refreshed.items.find((item) => item.image_id === nextImageId)
         setNextImageId(null)
         if (next) await openDetail(next); else setDetail(null)
@@ -207,7 +271,9 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
   }
   const applyLabel = (label: string, moveNext: boolean) => {
     if (!detail) return
-    if (detail.locked_by && detail.locked_by !== worker) { message.warning(`${detail.locked_by}님이 검수 중입니다.`); return }
+    if (detail.locked_by && detail.locked_by !== worker) {
+      message.warning(`${detail.locked_by}님이 검수 중입니다.`); return
+    }
     const next = moveNext ? items[detailIndex + 1] : undefined
     setNextImageId(next?.image_id ?? null)
     update.mutate({ image_id: detail.image_id, actor: worker, expected_version: detail.version, label })
@@ -222,7 +288,9 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
     const listener = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
       if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return
-      if (event.key === 'Enter' && detail && (!detail.locked_by || detail.locked_by === worker)) { event.preventDefault(); setHotkeyOpen(true) }
+      if (event.key === 'Enter' && detail && (!detail.locked_by || detail.locked_by === worker)) {
+        event.preventDefault(); setHotkeyOpen(true)
+      }
       if (event.key === 'ArrowLeft' && detail) void moveDetail(-1)
       if (event.key === 'ArrowRight' && detail) void moveDetail(1)
     }
@@ -232,9 +300,19 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
   useEffect(() => { if (hotkeyOpen) setTimeout(() => hotkeyInput.current?.focus(), 50) }, [hotkeyOpen])
   useEffect(() => {
     if (!detail || detail.locked_by !== worker) return
-    const timer = window.setInterval(() => { void heartbeat(detail.image_id, worker) }, 60000)
+    const timer = window.setInterval(() => { void imageHeartbeat(detail.image_id, worker) }, 60000)
     return () => window.clearInterval(timer)
   }, [detail?.image_id, detail?.locked_by, worker])
+  useEffect(() => {
+    if (!selectedFolder || selectedFolderInfo?.working_by !== worker) return
+    void folderHeartbeat(selectedFolder, worker)
+    const timer = window.setInterval(() => {
+      void folderHeartbeat(selectedFolder, worker).then(() => {
+        void qc.invalidateQueries({ queryKey: ['dataset-folders'] })
+      })
+    }, 60000)
+    return () => window.clearInterval(timer)
+  }, [selectedFolder, selectedFolderInfo?.working_by, worker])
 
   if (!selectedFolder) {
     const total = folderItems.reduce((sum, item) => sum + item.image_count, 0)
@@ -248,35 +326,35 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
         <Popconfirm title="전체 파일의 변경·삭제 상태까지 다시 확인합니다." okText="실행" cancelText="취소" onConfirm={() => scan.mutate('full')}>
           <Button icon={<ReloadOutlined />}>전체 재스캔</Button>
         </Popconfirm>
-        <Typography.Text type="secondary">기본 스캔은 DB에 없는 신규 파일만 추가합니다.</Typography.Text>
+        <Button icon={<HistoryOutlined />} onClick={() => setLogsOpen(true)}>전체 작업 로그</Button>
+        <Typography.Text type="secondary">작업 세션은 heartbeat가 3분간 끊기면 자동 해제됩니다.</Typography.Text>
       </Space></Card>
       {folderItems.length ? <div className="folder-grid">
         {folderItems.map((folder) => {
           const meta = folderStatusMeta[folder.work_status]
           return <Card key={folder.folder_name} hoverable className={`folder-card folder-${folder.work_status}`} onClick={() => void openFolder(folder)}>
-            <div className="folder-card-header">
-              <div className="folder-card-icon"><FolderOutlined /></div>
-              <Tag color={meta.color}>{meta.label}</Tag>
-            </div>
+            <div className="folder-card-header"><div className="folder-card-icon"><FolderOutlined /></div><Tag color={meta.color}>{meta.label}</Tag></div>
             <Typography.Title level={5} ellipsis={{ tooltip: folder.folder_name }}>{folder.folder_name}</Typography.Title>
-            <Space wrap>
-              <Tag color="blue">이미지 {folder.image_count}</Tag>
-              <Tag color="green">완료 {folder.reviewed_count}</Tag>
-              {folder.reviewing_count > 0 && <Tag color="orange">검수중 {folder.reviewing_count}</Tag>}
-            </Space>
+            <Space wrap><Tag color="blue">이미지 {folder.image_count}</Tag><Tag color="green">완료 {folder.reviewed_count}</Tag>{folder.reviewing_count > 0 && <Tag color="orange">검수중 {folder.reviewing_count}</Tag>}</Space>
             {folder.working_by && <Typography.Text type="secondary">작업자: {folder.working_by}</Typography.Text>}
             <Progress percent={Math.round(folder.progress)} size="small" status={folder.work_status === 'completed' ? 'success' : 'active'} />
             <Space className="folder-card-actions" onClick={(event) => event.stopPropagation()}>
               <Button type="link" icon={<FolderOpenOutlined />} onClick={() => void openFolder(folder)}>열기</Button>
-              {folder.work_status === 'working' && (
-                <Popconfirm title={`${folder.working_by ?? '현재 작업자'}의 작업 상태를 해제할까요?`} okText="해제" cancelText="취소" onConfirm={() => folderRelease.mutate({ folder: folder.folder_name, actor: worker, force: true })}>
-                  <Button type="link" danger icon={<StopOutlined />}>강제 해제</Button>
-                </Popconfirm>
-              )}
+              <Button type="link" icon={<HistoryOutlined />} onClick={() => { setSelectedFolder(folder.folder_name); setLogsOpen(true) }}>로그</Button>
+              {folder.work_status === 'working' && <Popconfirm title={`${folder.working_by ?? '현재 작업자'}의 작업 상태를 해제할까요?`} okText="해제" cancelText="취소" onConfirm={() => folderRelease.mutate({ folder: folder.folder_name, actor: worker, force: true })}><Button type="link" danger icon={<StopOutlined />}>강제 해제</Button></Popconfirm>}
             </Space>
           </Card>
         })}
       </div> : <Empty description="인식된 폴더가 없습니다." />}
+      <Modal title="작업 로그" open={logsOpen} width={900} footer={null} onCancel={() => { setLogsOpen(false); setSelectedFolder(null) }}>
+        <Table rowKey="log_id" size="small" dataSource={logs.data?.items ?? []} pagination={{ pageSize: 20 }} columns={[
+          { title: '폴더', dataIndex: 'folder_name', ellipsis: true },
+          { title: '작업', dataIndex: 'action', width: 110, render: (value: string) => actionLabels[value] ?? value },
+          { title: '작업자', dataIndex: 'actor', width: 100 },
+          { title: '상세', dataIndex: 'detail', ellipsis: true },
+          { title: '시간', dataIndex: 'created_at', width: 190 },
+        ]} />
+      </Modal>
     </>
   }
 
@@ -287,8 +365,13 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
       <Typography.Title level={4} style={{ margin: 0 }}>{selectedFolder}</Typography.Title>
       <Tag color={folderStatusMeta[selectedFolderInfo?.work_status ?? 'idle'].color}>{folderStatusMeta[selectedFolderInfo?.work_status ?? 'idle'].label}</Tag>
       {selectedFolderInfo?.working_by && <Tag color="orange">작업자 {selectedFolderInfo.working_by}</Tag>}
-      <Tag color="blue">{images.data?.total ?? 0}개</Tag>
-      <Input.Search placeholder="파일명·현재 라벨 검색" allowClear onSearch={(value) => { setSearch(value); setPage(1); void closeDetail() }} style={{ width: 260 }} />
+      <Tag color="blue">조회 {images.data?.total ?? 0}개</Tag>
+      <Input.Search placeholder="파일명·현재 라벨 검색" allowClear onSearch={(value) => { setSearch(value); setPage(1); void closeDetail() }} style={{ width: 240 }} />
+      <Select allowClear placeholder="검수 상태" options={reviewOptions} value={reviewFilter} onChange={(value) => { setReviewFilter(value); setPage(1); void closeDetail() }} style={{ width: 125 }} />
+      <Checkbox checked={mineOnly} onChange={(event) => { setMineOnly(event.target.checked); setPage(1); void closeDetail() }}>내 작업</Checkbox>
+      <Checkbox checked={changedOnly} onChange={(event) => { setChangedOnly(event.target.checked); setPage(1); void closeDetail() }}>라벨 변경됨</Checkbox>
+      <Button icon={<FileSearchOutlined />} onClick={resetFilters}>필터 초기화</Button>
+      <Button icon={<HistoryOutlined />} onClick={() => setLogsOpen(true)}>작업 로그</Button>
       {!folderReadOnly && <Button icon={<CheckCircleOutlined />} onClick={() => folderComplete.mutate({ folder: selectedFolder, actor: worker })}>폴더 완료</Button>}
       {selectedFolderInfo?.work_status === 'working' && <Button danger icon={<StopOutlined />} onClick={() => folderRelease.mutate({ folder: selectedFolder, actor: worker, force: folderReadOnly })}>작업 상태 해제</Button>}
     </Space></Card>
@@ -312,7 +395,7 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
           return <Card key={item.image_id} hoverable className={`image-card review-${item.review_status} ${ownerClass} ${detail?.image_id === item.image_id ? 'selected' : ''}`} cover={<div className="thumb-wrap"><img src={item.image_url} alt={item.filename} /><span className={`review-badge badge-${item.review_status}`}>{item.review_status === 'reviewed' ? '완료' : item.review_status === 'reviewing' ? '작업중' : '미검수'}</span>{item.locked_by && <span className="lock-badge"><LockOutlined /> {item.locked_by}</span>}</div>} onClick={() => void openDetail(item)}>
             <Card.Meta title={item.filename} description={<Space direction="vertical" size={2}><Typography.Text>{item.label}</Typography.Text><Typography.Text type="secondary">{item.review_status === 'reviewed' ? `검수: ${item.reviewed_by ?? '-'}` : item.locked_by ? `작업: ${item.locked_by}` : '미검수'}</Typography.Text></Space>} />
           </Card>
-        })}</div> : <Empty description="이 폴더에 표시할 이미지가 없습니다." />}
+        })}</div> : <Empty description="현재 필터에 해당하는 이미지가 없습니다." />}
         <Pagination current={page} pageSize={48} total={images.data?.total ?? 0} showSizeChanger={false} onChange={(value) => { setPage(value); void closeDetail() }} />
       </section>
     </div>
@@ -320,6 +403,14 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
     <Modal title="클래스 핫키 입력" open={hotkeyOpen} onCancel={() => { setHotkeyOpen(false); setHotkeyValue('') }} onOk={applyHotkey} okText="라벨 변경" cancelText="취소">
       <Input ref={hotkeyInput} value={hotkeyValue} onChange={(event) => setHotkeyValue(event.target.value.replace(/\D/g, ''))} onPressEnter={applyHotkey} placeholder="예: 1" inputMode="numeric" size="large" />
       <div className="hotkey-modal-list">{(hotkeys.data?.items ?? []).map((item) => <Tag key={item.key}>{item.key} · {item.label}</Tag>)}</div>
+    </Modal>
+    <Modal title={`${selectedFolder} 작업 로그`} open={logsOpen} width={900} footer={null} onCancel={() => setLogsOpen(false)}>
+      <Table rowKey="log_id" size="small" dataSource={logs.data?.items ?? []} pagination={{ pageSize: 20 }} columns={[
+        { title: '작업', dataIndex: 'action', width: 110, render: (value: string) => actionLabels[value] ?? value },
+        { title: '작업자', dataIndex: 'actor', width: 100 },
+        { title: '상세', dataIndex: 'detail', ellipsis: true },
+        { title: '시간', dataIndex: 'created_at', width: 190 },
+      ]} />
     </Modal>
   </>
 }
