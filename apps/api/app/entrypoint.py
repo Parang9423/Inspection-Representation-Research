@@ -58,6 +58,10 @@ def database_label_hotkeys() -> list[dict[str, str]]:
 main_module.label_hotkeys = database_label_hotkeys
 install_schema_guard()
 collaboration_module.ensure_normalized_schema = ensure_schema_ready
+collaboration_summary_module.ensure_normalized_schema = ensure_schema_ready
+dataset_browser_module.ensure_normalized_schema = ensure_schema_ready
+export_manager_module.ensure_normalized_schema = ensure_schema_ready
+folder_work_module.ensure_normalized_schema = ensure_schema_ready
 
 app.include_router(normalized_router)
 app.include_router(scan_router)
