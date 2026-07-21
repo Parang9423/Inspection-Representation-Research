@@ -54,9 +54,10 @@ def get_scan_status() -> dict[str, Any]:
 
 
 def _iter_images(root: Path) -> Iterator[tuple[str, str, str, int, float]]:
-    """Yield top-level folder, absolute path, filename, size and mtime."""
+    """Stream image metadata without accumulating the source tree in memory."""
     if not root.exists():
         return
+
     try:
         top_entries = sorted(
             (entry for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False)),
@@ -74,6 +75,7 @@ def _iter_images(root: Path) -> Iterator[tuple[str, str, str, int, float]]:
                 entries = os.scandir(directory)
             except OSError:
                 continue
+
             with entries:
                 for entry in entries:
                     try:
@@ -84,6 +86,7 @@ def _iter_images(root: Path) -> Iterator[tuple[str, str, str, int, float]]:
                             continue
                         if Path(entry.name).suffix.lower() not in IMAGE_EXTENSIONS:
                             continue
+
                         stat = entry.stat(follow_symlinks=False)
                         yield (
                             top.name,
@@ -100,15 +103,180 @@ def _image_id(absolute_path: str) -> str:
     return hashlib.sha1(absolute_path.encode("utf-8")).hexdigest()
 
 
-def _chunks(items: list[Any], size: int = _BATCH_SIZE) -> Iterator[list[Any]]:
-    for index in range(0, len(items), size):
-        yield items[index:index + size]
+def _ensure_folder(
+    conn: Any,
+    folder_ids: dict[str, int],
+    folder_name: str,
+    now: str,
+) -> int:
+    cached = folder_ids.get(folder_name)
+    if cached is not None:
+        return cached
+
+    absolute_path = str((DATA_ROOT / folder_name).resolve())
+    conn.execute(
+        """INSERT INTO folders(folder_name,absolute_path,last_scanned_at,created_at,updated_at)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(folder_name) DO UPDATE SET
+             absolute_path=excluded.absolute_path,
+             last_scanned_at=excluded.last_scanned_at,
+             updated_at=excluded.updated_at""",
+        (folder_name, absolute_path, now, now, now),
+    )
+    folder_id = int(
+        conn.execute(
+            "SELECT folder_id FROM folders WHERE folder_name=?", (folder_name,)
+        ).fetchone()[0]
+    )
+    folder_ids[folder_name] = folder_id
+    return folder_id
+
+
+def _refresh_touched_folder_counts(conn: Any, folder_ids: set[int], now: str) -> None:
+    if not folder_ids:
+        return
+    placeholders = ",".join("?" for _ in folder_ids)
+    params: list[Any] = [now, *sorted(folder_ids)]
+    conn.execute(
+        f"""UPDATE folders SET
+              image_count=(SELECT COUNT(*) FROM images i
+                           WHERE i.folder_id=folders.folder_id AND i.is_active=1),
+              reviewed_count=(SELECT COUNT(*) FROM images i
+                              JOIN image_annotations a ON a.image_id=i.image_id
+                              WHERE i.folder_id=folders.folder_id AND i.is_active=1
+                                AND a.review_status='reviewed'),
+              reviewing_count=(SELECT COUNT(*) FROM images i
+                               JOIN image_annotations a ON a.image_id=i.image_id
+                               WHERE i.folder_id=folders.folder_id AND i.is_active=1
+                                 AND a.review_status='reviewing'),
+              updated_at=?
+           WHERE folder_id IN ({placeholders})""",
+        params,
+    )
+
+
+def _flush_batch(
+    conn: Any,
+    batch: list[tuple[str, str, str, int, float]],
+    folder_ids: dict[str, int],
+    now: str,
+) -> tuple[int, int, int, set[int]]:
+    """Persist one bounded batch and return added/updated/unchanged counters."""
+    if not batch:
+        return 0, 0, 0, set()
+
+    paths = [record[1] for record in batch]
+    placeholders = ",".join("?" for _ in paths)
+    existing = {
+        row["path"]: (
+            row["image_id"],
+            int(row["size_bytes"]),
+            float(row["modified_at"]),
+            int(row["is_active"] or 0),
+            int(row["folder_id"] or 0),
+        )
+        for row in conn.execute(
+            f"""SELECT image_id,path,size_bytes,modified_at,is_active,folder_id
+                FROM images WHERE path IN ({placeholders})""",
+            paths,
+        ).fetchall()
+    }
+
+    insert_rows: list[tuple[Any, ...]] = []
+    update_rows: list[tuple[Any, ...]] = []
+    annotation_rows: list[tuple[Any, ...]] = []
+    split_rows: list[tuple[Any, ...]] = []
+    seen_rows: list[tuple[str]] = []
+    touched_folder_ids: set[int] = set()
+    added = updated = unchanged = 0
+
+    for folder_name, absolute_path, filename, size_bytes, modified_at in batch:
+        folder_id = _ensure_folder(conn, folder_ids, folder_name, now)
+        touched_folder_ids.add(folder_id)
+        seen_rows.append((absolute_path,))
+        current = existing.get(absolute_path)
+
+        if current is None:
+            image_id = _image_id(absolute_path)
+            insert_rows.append(
+                (
+                    image_id,
+                    absolute_path,
+                    filename,
+                    folder_name,
+                    folder_name,
+                    size_bytes,
+                    modified_at,
+                    now,
+                    now,
+                    folder_id,
+                    folder_name,
+                )
+            )
+            annotation_rows.append((image_id, folder_name, now))
+            split_rows.append((image_id, now))
+            added += 1
+            continue
+
+        _image, old_size, old_mtime, old_active, old_folder_id = current
+        if (
+            old_size != size_bytes
+            or old_mtime != modified_at
+            or old_active != 1
+            or old_folder_id != folder_id
+        ):
+            update_rows.append(
+                (
+                    folder_id,
+                    filename,
+                    size_bytes,
+                    modified_at,
+                    folder_name,
+                    folder_name,
+                    now,
+                    absolute_path,
+                )
+            )
+            updated += 1
+        else:
+            unchanged += 1
+
+    if insert_rows:
+        conn.executemany(
+            """INSERT INTO images(
+                   image_id,path,filename,source_label,label,split,status,note,
+                   size_bytes,modified_at,created_at,updated_at,folder_id,original_label,is_active)
+               VALUES(?,?,?,?,?,'unassigned','included','',?,?,?,?,?,?,1)""",
+            insert_rows,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO image_annotations(image_id,current_label,updated_at) VALUES(?,?,?)",
+            annotation_rows,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO split_assignments(image_id,split_set,assigned_at) VALUES(?,'unassigned',?)",
+            split_rows,
+        )
+
+    if update_rows:
+        conn.executemany(
+            """UPDATE images SET
+                   folder_id=?,filename=?,size_bytes=?,modified_at=?,source_label=?,
+                   original_label=?,is_active=1,updated_at=?
+               WHERE path=?""",
+            update_rows,
+        )
+
+    conn.executemany("INSERT OR IGNORE INTO scan_seen(path) VALUES(?)", seen_rows)
+    _refresh_touched_folder_counts(conn, touched_folder_ids, now)
+    conn.commit()
+    return added, updated, unchanged, touched_folder_ids
 
 
 def _run_scan() -> dict[str, Any]:
     _set_state(
-        status="discovering",
-        phase="discovering",
+        status="running",
+        phase="streaming",
         current_folder=None,
         discovered=0,
         processed=0,
@@ -123,96 +291,58 @@ def _run_scan() -> dict[str, Any]:
     )
 
     try:
-        records: list[tuple[str, str, str, int, float]] = []
-        for record in _iter_images(DATA_ROOT):
-            records.append(record)
-            if len(records) % 250 == 0:
-                _set_state(discovered=len(records))
-        _set_state(status="running", phase="indexing", discovered=len(records), total=len(records), processed=0)
-
         data_model.ensure_normalized_schema()
         now = _now()
-        folder_names = sorted({record[0] for record in records}, key=str.lower)
+        batch: list[tuple[str, str, str, int, float]] = []
+        folder_ids: dict[str, int] = {}
+        discovered = processed = added = updated = unchanged = 0
 
         with data_model.connect() as conn:
             conn.execute("CREATE TEMP TABLE IF NOT EXISTS scan_seen(path TEXT PRIMARY KEY)")
             conn.execute("DELETE FROM scan_seen")
-            for folder_name in folder_names:
-                absolute_path = str((DATA_ROOT / folder_name).resolve())
-                conn.execute(
-                    """INSERT INTO folders(folder_name,absolute_path,last_scanned_at,created_at,updated_at)
-                       VALUES(?,?,?,?,?)
-                       ON CONFLICT(folder_name) DO UPDATE SET absolute_path=excluded.absolute_path,
-                       last_scanned_at=excluded.last_scanned_at,updated_at=excluded.updated_at""",
-                    (folder_name, absolute_path, now, now, now),
+            conn.commit()
+
+            for record in _iter_images(DATA_ROOT):
+                batch.append(record)
+                discovered += 1
+                if discovered % 100 == 0:
+                    _set_state(discovered=discovered)
+
+                if len(batch) < _BATCH_SIZE:
+                    continue
+
+                batch_added, batch_updated, batch_unchanged, _ = _flush_batch(
+                    conn, batch, folder_ids, now
                 )
-            folder_ids = {
-                row["folder_name"]: row["folder_id"]
-                for row in conn.execute("SELECT folder_id,folder_name FROM folders").fetchall()
-            }
-            existing = {
-                row["path"]: (row["image_id"], int(row["size_bytes"]), float(row["modified_at"]), int(row["is_active"] or 0))
-                for row in conn.execute("SELECT image_id,path,size_bytes,modified_at,is_active FROM images").fetchall()
-            }
-
-            added = updated = unchanged = processed = 0
-            for batch in _chunks(records):
-                insert_rows: list[tuple[Any, ...]] = []
-                update_rows: list[tuple[Any, ...]] = []
-                annotation_rows: list[tuple[Any, ...]] = []
-                split_rows: list[tuple[Any, ...]] = []
-                seen_rows: list[tuple[str]] = []
-
-                for folder_name, absolute_path, filename, size_bytes, modified_at in batch:
-                    seen_rows.append((absolute_path,))
-                    folder_id = folder_ids[folder_name]
-                    current = existing.get(absolute_path)
-                    if current is None:
-                        image_id = _image_id(absolute_path)
-                        insert_rows.append((
-                            image_id, absolute_path, filename, folder_name, folder_name,
-                            size_bytes, modified_at, now, now, folder_id, folder_name,
-                        ))
-                        annotation_rows.append((image_id, folder_name, now))
-                        split_rows.append((image_id, now))
-                        added += 1
-                    else:
-                        _image, old_size, old_mtime, old_active = current
-                        if old_size != size_bytes or old_mtime != modified_at or old_active != 1:
-                            update_rows.append((
-                                folder_id, filename, size_bytes, modified_at,
-                                folder_name, now, absolute_path,
-                            ))
-                            updated += 1
-                        else:
-                            unchanged += 1
-
-                if insert_rows:
-                    conn.executemany(
-                        """INSERT INTO images(
-                               image_id,path,filename,source_label,label,split,status,note,
-                               size_bytes,modified_at,created_at,updated_at,folder_id,original_label,is_active)
-                           VALUES(?,?,?,?,?,'unassigned','included','',?,?,?,?,?,?,1)""",
-                        insert_rows,
-                    )
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO image_annotations(image_id,current_label,updated_at) VALUES(?,?,?)",
-                        annotation_rows,
-                    )
-                    conn.executemany(
-                        "INSERT OR IGNORE INTO split_assignments(image_id,split_set,assigned_at) VALUES(?,'unassigned',?)",
-                        split_rows,
-                    )
-                if update_rows:
-                    conn.executemany(
-                        """UPDATE images SET folder_id=?,filename=?,size_bytes=?,modified_at=?,
-                           original_label=?,is_active=1,updated_at=? WHERE path=?""",
-                        update_rows,
-                    )
-                conn.executemany("INSERT OR IGNORE INTO scan_seen(path) VALUES(?)", seen_rows)
-                conn.commit()
+                added += batch_added
+                updated += batch_updated
+                unchanged += batch_unchanged
                 processed += len(batch)
-                _set_state(processed=processed, added=added, updated=updated, unchanged=unchanged)
+                batch.clear()
+                _set_state(
+                    discovered=discovered,
+                    processed=processed,
+                    added=added,
+                    updated=updated,
+                    unchanged=unchanged,
+                )
+
+            if batch:
+                batch_added, batch_updated, batch_unchanged, _ = _flush_batch(
+                    conn, batch, folder_ids, now
+                )
+                added += batch_added
+                updated += batch_updated
+                unchanged += batch_unchanged
+                processed += len(batch)
+                batch.clear()
+                _set_state(
+                    discovered=discovered,
+                    processed=processed,
+                    added=added,
+                    updated=updated,
+                    unchanged=unchanged,
+                )
 
             cursor = conn.execute(
                 """UPDATE images SET is_active=0,updated_at=?
@@ -226,7 +356,7 @@ def _run_scan() -> dict[str, Any]:
             conn.commit()
 
         result = {
-            "count": len(records),
+            "count": processed,
             "added": added,
             "updated": updated,
             "unchanged": unchanged,
@@ -236,8 +366,9 @@ def _run_scan() -> dict[str, Any]:
             status="finished",
             phase="finished",
             current_folder=None,
-            processed=len(records),
-            total=len(records),
+            discovered=discovered,
+            processed=processed,
+            total=processed,
             added=added,
             updated=updated,
             unchanged=unchanged,
@@ -246,7 +377,12 @@ def _run_scan() -> dict[str, Any]:
         )
         return result
     except Exception as exc:
-        _set_state(status="failed", phase="failed", error=f"{type(exc).__name__}: {exc}", finished_at=_now())
+        _set_state(
+            status="failed",
+            phase="failed",
+            error=f"{type(exc).__name__}: {exc}",
+            finished_at=_now(),
+        )
         raise
 
 
@@ -264,7 +400,11 @@ def start_background_scan() -> dict[str, Any]:
 @router.post("/api/scan")
 def start_scan_route() -> dict[str, Any]:
     status = start_background_scan()
-    return {**status, "accepted": True, "count": int(status.get("total") or status.get("discovered") or 0)}
+    return {
+        **status,
+        "accepted": True,
+        "count": int(status.get("processed") or status.get("discovered") or 0),
+    }
 
 
 @router.post("/api/scan/start")
