@@ -6,6 +6,7 @@ services:
       AOI_CAM_ROOT: /data/cam_image
       AOI_BACKUP_ROOT: /data/backup_image
       AOI_EXPORT_ROOT: /state/exports
+      AOI_THUMB_ROOT: /state/thumbnail_cache
       AOI_DB_PATH: /state/dataset_manager.db
     volumes:
       - ${AOI_IMAGE_DIR:-./split_image}:/data/split_image
