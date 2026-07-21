@@ -38,6 +38,7 @@ interface ImageItem {
   split: SplitCode
   status: string
   image_url: string
+  thumbnail_url?: string
   cam_url: string
   version: number
   assigned_to?: string | null
@@ -66,6 +67,12 @@ async function fetchFolderImages(params: Record<string, unknown>) {
 async function fetchHotkeys() {
   return (await api.get<{ items: Array<{ key: string; label: string }> }>('/labels/hotkeys')).data
 }
+async function fetchHistory(imageId: string) {
+  return (await api.get<{ items: Array<Record<string, unknown>> }>(`/collaboration/images/${imageId}/history`)).data
+}
+async function fetchWorkLogs(folder?: string) {
+  return (await api.get<{ items: WorkLog[] }>('/folder-work/logs', { params: { folder_name: folder, limit: 100 } })).data
+}
 async function scanDataset(mode: 'quick' | 'full') {
   return (await api.post(`/scan/${mode}`)).data
 }
@@ -80,12 +87,6 @@ async function completeFolder(folder: string, actor: string) {
 }
 async function folderHeartbeat(folder: string, actor: string) {
   return (await api.post(`/folder-work/folders/${encodeURIComponent(folder)}/heartbeat`, { actor })).data
-}
-async function fetchWorkLogs(folder?: string) {
-  return (await api.get<{ items: WorkLog[] }>('/folder-work/logs', { params: { folder_name: folder, limit: 100 } })).data
-}
-async function fetchHistory(imageId: string) {
-  return (await api.get<{ items: Array<Record<string, unknown>> }>(`/collaboration/images/${imageId}/history`)).data
 }
 async function acquireLock(imageId: string, actor: string) {
   return (await api.post<ImageItem>(`/collaboration/images/${imageId}/lock`, { actor })).data
@@ -115,7 +116,8 @@ const reviewOptions = [
 ]
 const actionLabels: Record<string, string> = {
   start: '작업 시작', release: '작업 해제', force_release: '강제 해제',
-  complete: '작업 완료', auto_release: '자동 해제',
+  complete: '작업 완료', auto_release: '자동 해제', image_reviewed: '이미지 검수',
+  label_change: '라벨 변경',
 }
 
 export default function FolderDatasetGrid({ worker }: { worker: string }) {
@@ -133,12 +135,8 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
   const [nextImageId, setNextImageId] = useState<string | null>(null)
   const [logsOpen, setLogsOpen] = useState(false)
 
-  const folders = useQuery({
-    queryKey: ['dataset-folders'], queryFn: fetchFolders, refetchInterval: 5000,
-  })
-  const imageQueryKey = [
-    'folder-images', selectedFolder, page, search, reviewFilter, mineOnly, changedOnly,
-  ]
+  const folders = useQuery({ queryKey: ['dataset-folders'], queryFn: fetchFolders, refetchInterval: 5000 })
+  const imageQueryKey = ['folder-images', selectedFolder, page, search, reviewFilter, mineOnly, changedOnly]
   const images = useQuery({
     queryKey: imageQueryKey,
     queryFn: () => fetchFolderImages({
@@ -184,6 +182,12 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
       qc.invalidateQueries({ queryKey: ['summary'] }),
     ])
   }
+  const resetFilters = () => {
+    setReviewFilter(undefined)
+    setMineOnly(false)
+    setChangedOnly(false)
+    setPage(1)
+  }
 
   const folderStart = useMutation({
     mutationFn: ({ folder, actor }: { folder: string; actor: string }) => startFolder(folder, actor),
@@ -199,18 +203,23 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
     mutationFn: ({ folder, actor }: { folder: string; actor: string }) => completeFolder(folder, actor),
     onSuccess: async () => { await refresh(); message.success('폴더 작업을 완료 처리했습니다.') },
   })
+  const scan = useMutation({
+    mutationFn: scanDataset,
+    onSuccess: (data) => message.success(data.accepted === false ? '이미 스캔이 실행 중입니다.' : data.resume ? '실패 지점부터 스캔을 재개했습니다.' : '스캔 작업을 시작했습니다.'),
+    onError: () => message.error('스캔 시작에 실패했습니다.'),
+  })
 
-  const resetFilters = () => {
-    setReviewFilter(undefined); setMineOnly(false); setChangedOnly(false); setPage(1)
-  }
   const openFolder = async (folder: FolderItem) => {
     try {
       if (folder.work_status !== 'completed' && (!folder.working_by || folder.working_by === worker)) {
         await folderStart.mutateAsync({ folder: folder.folder_name, actor: worker })
       }
-    } catch { /* read-only entry */ }
+    } catch { /* 읽기 전용 진입 */ }
     setSelectedFolder(folder.folder_name)
-    setPage(1); setSearch(''); setDetail(null); resetFilters()
+    setPage(1)
+    setSearch('')
+    setDetail(null)
+    resetFilters()
   }
   const openDetail = async (item: ImageItem) => {
     if (detail?.locked_by === worker && detail.image_id !== item.image_id) {
@@ -228,7 +237,11 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
     setDetail(null)
   }
   const leaveFolder = async () => {
-    await closeDetail(); setSelectedFolder(null); setPage(1); setSearch(''); resetFilters()
+    await closeDetail()
+    setSelectedFolder(null)
+    setPage(1)
+    setSearch('')
+    resetFilters()
   }
 
   const update = useMutation({
@@ -237,31 +250,34 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
       await refresh()
       if (nextImageId) {
         const refreshed = await fetchFolderImages({
-          source_label: selectedFolder, page, page_size: 48, search: search || undefined,
-          review_status: reviewFilter, actor: mineOnly ? worker : undefined,
+          source_label: selectedFolder,
+          page,
+          page_size: 48,
+          search: search || undefined,
+          review_status: reviewFilter,
+          actor: mineOnly ? worker : undefined,
           changed_only: changedOnly || undefined,
         })
         qc.setQueryData(imageQueryKey, refreshed)
         const next = refreshed.items.find((item) => item.image_id === nextImageId)
         setNextImageId(null)
-        if (next) await openDetail(next); else setDetail(null)
+        if (next) await openDetail(next)
+        else setDetail(null)
       } else setDetail(updated)
       message.success('변경 내용을 저장했습니다.')
     },
     onError: async (error: any) => {
       const payload = error?.response?.data?.detail
       message.error(payload?.message ?? '저장 중 오류가 발생했습니다.')
-      setNextImageId(null); await refresh(); if (payload?.item) setDetail(payload.item)
+      setNextImageId(null)
+      await refresh()
+      if (payload?.item) setDetail(payload.item)
     },
   })
   const remove = useMutation({
     mutationFn: backupDelete,
     onSuccess: async () => { setDetail(null); await refresh(); message.success('이미지를 백업 폴더로 이동했습니다.') },
-  })
-  const scan = useMutation({
-    mutationFn: scanDataset,
-    onSuccess: (data) => message.success(data.accepted === false ? '이미 스캔이 실행 중입니다.' : '스캔 작업을 시작했습니다.'),
-    onError: () => message.error('스캔 시작에 실패했습니다.'),
+    onError: (error: any) => message.error(error?.response?.data?.detail?.message ?? '삭제 중 오류가 발생했습니다.'),
   })
 
   const moveDetail = async (offset: number) => {
@@ -272,7 +288,8 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
   const applyLabel = (label: string, moveNext: boolean) => {
     if (!detail) return
     if (detail.locked_by && detail.locked_by !== worker) {
-      message.warning(`${detail.locked_by}님이 검수 중입니다.`); return
+      message.warning(`${detail.locked_by}님이 검수 중입니다.`)
+      return
     }
     const next = moveNext ? items[detailIndex + 1] : undefined
     setNextImageId(next?.image_id ?? null)
@@ -281,7 +298,9 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
   const applyHotkey = () => {
     const label = hotkeyMap.get(hotkeyValue.trim())
     if (!label) { message.error('등록되지 않은 핫키 번호입니다.'); return }
-    applyLabel(label, true); setHotkeyOpen(false); setHotkeyValue('')
+    applyLabel(label, true)
+    setHotkeyOpen(false)
+    setHotkeyValue('')
   }
 
   useEffect(() => {
@@ -289,7 +308,8 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
       const target = event.target as HTMLElement | null
       if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return
       if (event.key === 'Enter' && detail && (!detail.locked_by || detail.locked_by === worker)) {
-        event.preventDefault(); setHotkeyOpen(true)
+        event.preventDefault()
+        setHotkeyOpen(true)
       }
       if (event.key === 'ArrowLeft' && detail) void moveDetail(-1)
       if (event.key === 'ArrowRight' && detail) void moveDetail(1)
@@ -307,12 +327,22 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
     if (!selectedFolder || selectedFolderInfo?.working_by !== worker) return
     void folderHeartbeat(selectedFolder, worker)
     const timer = window.setInterval(() => {
-      void folderHeartbeat(selectedFolder, worker).then(() => {
-        void qc.invalidateQueries({ queryKey: ['dataset-folders'] })
-      })
+      void folderHeartbeat(selectedFolder, worker).then(() => qc.invalidateQueries({ queryKey: ['dataset-folders'] }))
     }, 60000)
     return () => window.clearInterval(timer)
   }, [selectedFolder, selectedFolderInfo?.working_by, worker])
+
+  const logsModal = (
+    <Modal title={selectedFolder ? `${selectedFolder} 작업 로그` : '전체 작업 로그'} open={logsOpen} width={900} footer={null} onCancel={() => setLogsOpen(false)}>
+      <Table rowKey="log_id" size="small" dataSource={logs.data?.items ?? []} pagination={{ pageSize: 20 }} columns={[
+        { title: '폴더', dataIndex: 'folder_name', ellipsis: true },
+        { title: '작업', dataIndex: 'action', width: 110, render: (value: string) => actionLabels[value] ?? value },
+        { title: '작업자', dataIndex: 'actor', width: 100 },
+        { title: '상세', dataIndex: 'detail', ellipsis: true },
+        { title: '시간', dataIndex: 'created_at', width: 190 },
+      ]} />
+    </Modal>
+  )
 
   if (!selectedFolder) {
     const total = folderItems.reduce((sum, item) => sum + item.image_count, 0)
@@ -327,7 +357,7 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
           <Button icon={<ReloadOutlined />}>전체 재스캔</Button>
         </Popconfirm>
         <Button icon={<HistoryOutlined />} onClick={() => setLogsOpen(true)}>전체 작업 로그</Button>
-        <Typography.Text type="secondary">작업 세션은 heartbeat가 3분간 끊기면 자동 해제됩니다.</Typography.Text>
+        <Typography.Text type="secondary">실패한 빠른 스캔은 마지막 체크포인트에서 자동 재개됩니다.</Typography.Text>
       </Space></Card>
       {folderItems.length ? <div className="folder-grid">
         {folderItems.map((folder) => {
@@ -346,15 +376,7 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
           </Card>
         })}
       </div> : <Empty description="인식된 폴더가 없습니다." />}
-      <Modal title="작업 로그" open={logsOpen} width={900} footer={null} onCancel={() => { setLogsOpen(false); setSelectedFolder(null) }}>
-        <Table rowKey="log_id" size="small" dataSource={logs.data?.items ?? []} pagination={{ pageSize: 20 }} columns={[
-          { title: '폴더', dataIndex: 'folder_name', ellipsis: true },
-          { title: '작업', dataIndex: 'action', width: 110, render: (value: string) => actionLabels[value] ?? value },
-          { title: '작업자', dataIndex: 'actor', width: 100 },
-          { title: '상세', dataIndex: 'detail', ellipsis: true },
-          { title: '시간', dataIndex: 'created_at', width: 190 },
-        ]} />
-      </Modal>
+      {logsModal}
     </>
   }
 
@@ -392,7 +414,7 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
       <section className="grid-pane">
         {items.length ? <div className="image-grid">{items.map((item) => {
           const ownerClass = item.locked_by === worker ? 'mine' : item.locked_by ? 'locked' : ''
-          return <Card key={item.image_id} hoverable className={`image-card review-${item.review_status} ${ownerClass} ${detail?.image_id === item.image_id ? 'selected' : ''}`} cover={<div className="thumb-wrap"><img src={item.image_url} alt={item.filename} /><span className={`review-badge badge-${item.review_status}`}>{item.review_status === 'reviewed' ? '완료' : item.review_status === 'reviewing' ? '작업중' : '미검수'}</span>{item.locked_by && <span className="lock-badge"><LockOutlined /> {item.locked_by}</span>}</div>} onClick={() => void openDetail(item)}>
+          return <Card key={item.image_id} hoverable className={`image-card review-${item.review_status} ${ownerClass} ${detail?.image_id === item.image_id ? 'selected' : ''}`} cover={<div className="thumb-wrap"><img loading="lazy" decoding="async" src={item.thumbnail_url ?? item.image_url} alt={item.filename} /><span className={`review-badge badge-${item.review_status}`}>{item.review_status === 'reviewed' ? '완료' : item.review_status === 'reviewing' ? '작업중' : '미검수'}</span>{item.locked_by && <span className="lock-badge"><LockOutlined /> {item.locked_by}</span>}</div>} onClick={() => void openDetail(item)}>
             <Card.Meta title={item.filename} description={<Space direction="vertical" size={2}><Typography.Text>{item.label}</Typography.Text><Typography.Text type="secondary">{item.review_status === 'reviewed' ? `검수: ${item.reviewed_by ?? '-'}` : item.locked_by ? `작업: ${item.locked_by}` : '미검수'}</Typography.Text></Space>} />
           </Card>
         })}</div> : <Empty description="현재 필터에 해당하는 이미지가 없습니다." />}
@@ -404,13 +426,6 @@ export default function FolderDatasetGrid({ worker }: { worker: string }) {
       <Input ref={hotkeyInput} value={hotkeyValue} onChange={(event) => setHotkeyValue(event.target.value.replace(/\D/g, ''))} onPressEnter={applyHotkey} placeholder="예: 1" inputMode="numeric" size="large" />
       <div className="hotkey-modal-list">{(hotkeys.data?.items ?? []).map((item) => <Tag key={item.key}>{item.key} · {item.label}</Tag>)}</div>
     </Modal>
-    <Modal title={`${selectedFolder} 작업 로그`} open={logsOpen} width={900} footer={null} onCancel={() => setLogsOpen(false)}>
-      <Table rowKey="log_id" size="small" dataSource={logs.data?.items ?? []} pagination={{ pageSize: 20 }} columns={[
-        { title: '작업', dataIndex: 'action', width: 110, render: (value: string) => actionLabels[value] ?? value },
-        { title: '작업자', dataIndex: 'actor', width: 100 },
-        { title: '상세', dataIndex: 'detail', ellipsis: true },
-        { title: '시간', dataIndex: 'created_at', width: 190 },
-      ]} />
-    </Modal>
+    {logsModal}
   </>
 }
