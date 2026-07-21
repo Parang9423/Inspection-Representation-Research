@@ -101,33 +101,31 @@ export default function ScanStatusBanner() {
   }
 
   if (status.running) {
-    const discovering = status.status === 'discovering'
+    const streaming = status.phase === 'streaming' || status.total === 0
     return (
       <Alert
         className="scan-status-banner"
         type="info"
         showIcon
-        message={discovering ? '이미지 파일을 탐색하고 있습니다.' : '데이터셋 DB를 구성하고 있습니다.'}
+        message={streaming ? '이미지를 탐색하며 DB에 실시간 반영하고 있습니다.' : '데이터셋 DB를 구성하고 있습니다.'}
         description={(
           <Space direction="vertical" size={6} style={{ width: '100%' }}>
             <Space wrap>
               {status.current_folder && <Tag color="blue">현재 폴더: {status.current_folder}</Tag>}
               <Typography.Text>
-                {discovering
-                  ? `${status.discovered.toLocaleString()}개 파일 발견`
+                {streaming
+                  ? `발견 ${status.discovered.toLocaleString()}개 · DB 반영 ${status.processed.toLocaleString()}개`
                   : `${status.processed.toLocaleString()} / ${status.total.toLocaleString()}개 처리`}
               </Typography.Text>
             </Space>
             <Progress
-              percent={discovering ? undefined : status.percent}
+              percent={streaming ? undefined : status.percent}
               status="active"
-              showInfo={!discovering}
+              showInfo={!streaming}
             />
-            {!discovering && (
-              <Typography.Text type="secondary">
-                신규 {status.added.toLocaleString()} · 변경 {status.updated.toLocaleString()} · 기존 {status.unchanged.toLocaleString()}
-              </Typography.Text>
-            )}
+            <Typography.Text type="secondary">
+              신규 {status.added.toLocaleString()} · 변경 {status.updated.toLocaleString()} · 기존 {status.unchanged.toLocaleString()}
+            </Typography.Text>
           </Space>
         )}
       />
