@@ -3,8 +3,20 @@ from __future__ import annotations
 from .data_model import connect
 
 
+_TRIGGER_NAMES = (
+    "trg_annotations_insert_legacy",
+    "trg_annotations_update_legacy",
+    "trg_split_insert_legacy",
+    "trg_split_update_legacy",
+)
+
+
 def ensure_compatibility_triggers() -> None:
-    """Migrate legacy history and mirror normalized state during the transition."""
+    """Migrate legacy history and recreate compatibility triggers safely.
+
+    Normalized tables are the source of truth. These triggers only mirror state
+    into legacy images columns for older endpoints during the transition.
+    """
     with connect() as conn:
         legacy_history = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='label_history'"
@@ -26,9 +38,15 @@ def ensure_compatibility_triggers() -> None:
                    )"""
             )
 
+        # IF NOT EXISTS would keep an outdated trigger definition. Drop and
+        # recreate them after every schema migration so partial deployments are
+        # repaired automatically.
+        for trigger_name in _TRIGGER_NAMES:
+            conn.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
+
         conn.executescript(
             """
-            CREATE TRIGGER IF NOT EXISTS trg_annotations_insert_legacy
+            CREATE TRIGGER trg_annotations_insert_legacy
             AFTER INSERT ON image_annotations
             BEGIN
                 UPDATE images SET
@@ -44,7 +62,7 @@ def ensure_compatibility_triggers() -> None:
                 WHERE image_id=NEW.image_id;
             END;
 
-            CREATE TRIGGER IF NOT EXISTS trg_annotations_update_legacy
+            CREATE TRIGGER trg_annotations_update_legacy
             AFTER UPDATE ON image_annotations
             BEGIN
                 UPDATE images SET
@@ -60,18 +78,23 @@ def ensure_compatibility_triggers() -> None:
                 WHERE image_id=NEW.image_id;
             END;
 
-            CREATE TRIGGER IF NOT EXISTS trg_split_insert_legacy
+            CREATE TRIGGER trg_split_insert_legacy
             AFTER INSERT ON split_assignments
             BEGIN
-                UPDATE images SET split=NEW.split_set,updated_at=COALESCE(NEW.assigned_at,updated_at)
+                UPDATE images SET
+                    split=NEW.split_set,
+                    updated_at=COALESCE(NEW.assigned_at,updated_at)
                 WHERE image_id=NEW.image_id;
             END;
 
-            CREATE TRIGGER IF NOT EXISTS trg_split_update_legacy
+            CREATE TRIGGER trg_split_update_legacy
             AFTER UPDATE ON split_assignments
             BEGIN
-                UPDATE images SET split=NEW.split_set,updated_at=COALESCE(NEW.assigned_at,updated_at)
+                UPDATE images SET
+                    split=NEW.split_set,
+                    updated_at=COALESCE(NEW.assigned_at,updated_at)
                 WHERE image_id=NEW.image_id;
             END;
             """
         )
+        conn.commit()
