@@ -1,0 +1,23 @@
+services:
+  api:
+    build: ./apps/api
+    environment:
+      AOI_DATA_ROOT: /data/split_image
+      AOI_CAM_ROOT: /data/cam_image
+      AOI_BACKUP_ROOT: /data/backup_image
+      AOI_EXPORT_ROOT: /state/exports
+      AOI_THUMB_ROOT: /state/thumbnail_cache
+      AOI_DB_PATH: /state/dataset_manager.db
+    volumes:
+      - ${AOI_IMAGE_DIR:-./split_image}:/data/split_image
+      - ${AOI_CAM_DIR:-./cam_image}:/data/cam_image:ro
+      - ${AOI_BACKUP_DIR:-./backup_image}:/data/backup_image
+      - ./data:/state
+    restart: unless-stopped
+  web:
+    build: ./apps/web
+    ports:
+      - "8501:80"
+    depends_on:
+      - api
+    restart: unless-stopped

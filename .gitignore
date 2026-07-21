@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
+dist/
+.env
+*.db
+/data/split_image/*
+/data/cam_image/*
+/data/exports/*
+!/data/split_image/.gitkeep
+!/data/cam_image/.gitkeep
+!/data/exports/.gitkeep

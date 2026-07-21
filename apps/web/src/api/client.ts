@@ -1,0 +1,69 @@
+import axios from 'axios'
+import type { ImageItem, SplitCode, StatusCode, Summary } from '../types'
+
+export const api = axios.create({ baseURL: '/api' })
+
+export async function fetchImages(params: Record<string, unknown>) {
+  return (await api.get<{ items: ImageItem[]; total: number }>('/images', { params })).data
+}
+
+export async function fetchSummary() {
+  return (await api.get<Summary>('/summary')).data
+}
+
+export async function fetchHotkeys() {
+  return (await api.get<{ items: Array<{ key: string; label: string }> }>('/labels/hotkeys')).data
+}
+
+export async function bulkUpdate(payload: {
+  image_ids: string[]
+  label?: string
+  split?: SplitCode
+  status?: StatusCode
+  note?: string
+}) {
+  const activeElement = document.activeElement as HTMLInputElement | null
+  const submittedFromHotkey = Boolean(
+    payload.label
+      && payload.image_ids.length === 1
+      && activeElement?.getAttribute('placeholder') === '예: 1',
+  )
+
+  const result = (await api.patch('/images/bulk', payload)).data
+
+  if (submittedFromHotkey) {
+    window.setTimeout(() => {
+      const nextButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent?.trim() === '다음' && !button.disabled,
+      )
+      nextButton?.click()
+    }, 0)
+  }
+
+  return result
+}
+
+export async function backupDelete(payload: { image_ids: string[] }) {
+  return (await api.post('/images/backup-delete', payload)).data
+}
+
+export async function autoSplit(payload: {
+  train_ratio: number
+  valid_ratio: number
+  test_ratio: number
+  seed: number
+  only_unassigned: boolean
+}) {
+  return (await api.post('/splits/auto', payload)).data
+}
+
+export async function exportDataset(payload: {
+  dataset_name: string
+  mode: 'copy' | 'hardlink' | 'manifest'
+}) {
+  return (await api.post('/exports', payload)).data
+}
+
+export async function scanDataset() {
+  return (await api.post('/scan')).data
+}

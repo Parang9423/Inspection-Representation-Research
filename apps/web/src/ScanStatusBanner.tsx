@@ -1,0 +1,146 @@
+import { useEffect, useRef } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Alert, Button, Progress, Space, Tag, Typography, message } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
+import axios from 'axios'
+
+const api = axios.create({ baseURL: '/api' })
+
+type ScanStatusCode = 'idle' | 'queued' | 'discovering' | 'running' | 'finished' | 'failed'
+
+interface ScanStatus {
+  status: ScanStatusCode
+  phase: string
+  running: boolean
+  current_folder?: string | null
+  discovered: number
+  processed: number
+  total: number
+  percent: number
+  added: number
+  updated: number
+  unchanged: number
+  deactivated: number
+  started_at?: string | null
+  finished_at?: string | null
+  error?: string | null
+}
+
+async function fetchScanStatus() {
+  return (await api.get<ScanStatus>('/scan/status')).data
+}
+
+async function startScan() {
+  return (await api.post<ScanStatus>('/scan/start')).data
+}
+
+export default function ScanStatusBanner() {
+  const queryClient = useQueryClient()
+  const previousStatus = useRef<ScanStatusCode>('idle')
+
+  const scan = useQuery({
+    queryKey: ['scan-status'],
+    queryFn: fetchScanStatus,
+    refetchInterval: (query) => query.state.data?.running ? 1000 : 5000,
+    refetchIntervalInBackground: true,
+  })
+
+  const start = useMutation({
+    mutationFn: startScan,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['scan-status'] })
+      message.info('폴더 동기화를 백그라운드 작업 큐에 등록했습니다.')
+    },
+    onError: () => message.error('폴더 동기화를 시작하지 못했습니다.'),
+  })
+
+  const status = scan.data
+
+  useEffect(() => {
+    if (!status) return
+
+    const previous = previousStatus.current
+    previousStatus.current = status.status
+
+    if (status.status === 'finished' && previous !== 'finished') {
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['dataset-folders'] }),
+        queryClient.invalidateQueries({ queryKey: ['folder-images'] }),
+        queryClient.invalidateQueries({ queryKey: ['hotkeys'] }),
+        queryClient.invalidateQueries({ queryKey: ['summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['split-images'] }),
+      ])
+    }
+  }, [status, queryClient])
+
+  if (!status || status.status === 'idle') return null
+
+  if (status.status === 'failed') {
+    return (
+      <Alert
+        className="scan-status-banner"
+        type="error"
+        showIcon
+        message="데이터셋 인덱싱 실패"
+        description={status.error ?? 'API 로그를 확인하세요.'}
+        action={<Button icon={<ReloadOutlined />} loading={start.isPending} onClick={() => start.mutate()}>다시 시도</Button>}
+      />
+    )
+  }
+
+  if (status.status === 'queued') {
+    return (
+      <Alert
+        className="scan-status-banner"
+        type="info"
+        showIcon
+        message="데이터셋 인덱싱 대기 중"
+        description="초기 DB 마이그레이션 또는 앞선 파일 작업이 끝나면 자동으로 시작됩니다. API와 UI는 계속 사용할 수 있습니다."
+      />
+    )
+  }
+
+  if (status.running) {
+    const streaming = status.phase === 'streaming' || status.total === 0
+    return (
+      <Alert
+        className="scan-status-banner"
+        type="info"
+        showIcon
+        message={streaming ? '이미지를 탐색하며 DB에 실시간 반영하고 있습니다.' : '데이터셋 DB를 구성하고 있습니다.'}
+        description={(
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            <Space wrap>
+              {status.current_folder && <Tag color="blue">현재 폴더: {status.current_folder}</Tag>}
+              <Typography.Text>
+                {streaming
+                  ? `발견 ${status.discovered.toLocaleString()}개 · DB 반영 ${status.processed.toLocaleString()}개`
+                  : `${status.processed.toLocaleString()} / ${status.total.toLocaleString()}개 처리`}
+              </Typography.Text>
+            </Space>
+            <Progress
+              percent={streaming ? undefined : status.percent}
+              status="active"
+              showInfo={!streaming}
+            />
+            <Typography.Text type="secondary">
+              신규 {status.added.toLocaleString()} · 변경 {status.updated.toLocaleString()} · 기존 {status.unchanged.toLocaleString()}
+            </Typography.Text>
+          </Space>
+        )}
+      />
+    )
+  }
+
+  return (
+    <Alert
+      className="scan-status-banner"
+      type="success"
+      showIcon
+      closable
+      message="데이터셋 동기화 완료"
+      description={`전체 ${status.total.toLocaleString()}개 · 신규 ${status.added.toLocaleString()}개 · 변경 ${status.updated.toLocaleString()}개 · 비활성 ${status.deactivated.toLocaleString()}개`}
+      action={<Button size="small" icon={<ReloadOutlined />} loading={start.isPending} onClick={() => start.mutate()}>다시 스캔</Button>}
+    />
+  )
+}
