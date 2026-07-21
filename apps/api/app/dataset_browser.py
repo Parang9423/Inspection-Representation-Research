@@ -19,7 +19,6 @@ def hotkey_sort_key(item: dict) -> tuple[int, str]:
 
 @router.get("/folders")
 def list_folders() -> dict:
-    """Return the small folder catalog without grouping the image table."""
     ensure_normalized_schema()
     with connect() as conn:
         rows = conn.execute(
@@ -34,7 +33,6 @@ def list_folders() -> dict:
 
 @router.get("/hotkeys")
 def list_hotkeys() -> dict:
-    """Build stable class hotkeys from the folder catalog."""
     ensure_normalized_schema()
     with connect() as conn:
         rows = conn.execute(
@@ -77,15 +75,32 @@ def list_folder_images(
     page: int = Query(1, ge=1),
     page_size: int = Query(48, ge=1, le=200),
     search: str | None = None,
+    review_status: str | None = Query(None, pattern="^(unreviewed|reviewing|reviewed)$"),
+    actor: str | None = None,
+    changed_only: bool = False,
 ) -> dict:
-    """Load only one page of image paths and annotation state for a folder."""
+    """Load one page of image metadata using server-side review filters."""
     ensure_normalized_schema()
     where = ["i.is_active=1", "f.folder_name=?"]
     params: list[object] = [source_label]
+
     if search:
-        where.append("(i.filename LIKE ? OR COALESCE(a.current_label,i.original_label,f.folder_name) LIKE ?)")
+        where.append(
+            "(i.filename LIKE ? OR COALESCE(a.current_label,i.original_label,f.folder_name) LIKE ?)"
+        )
         term = f"%{search}%"
         params.extend([term, term])
+    if review_status:
+        where.append("COALESCE(a.review_status,'unreviewed')=?")
+        params.append(review_status)
+    if actor:
+        where.append("(a.reviewed_by=? OR a.assigned_to=? OR a.locked_by=?)")
+        params.extend([actor, actor, actor])
+    if changed_only:
+        where.append(
+            "EXISTS(SELECT 1 FROM annotation_history h WHERE h.image_id=i.image_id)"
+        )
+
     clause = " AND ".join(where)
     offset = (page - 1) * page_size
 
@@ -98,7 +113,8 @@ def list_folder_images(
             params,
         ).fetchone()[0]
         rows = conn.execute(
-            catalog_select() + f" WHERE {clause} ORDER BY i.filename COLLATE NOCASE LIMIT ? OFFSET ?",
+            catalog_select()
+            + f" WHERE {clause} ORDER BY i.filename COLLATE NOCASE LIMIT ? OFFSET ?",
             [*params, page_size, offset],
         ).fetchall()
 
@@ -108,4 +124,9 @@ def list_folder_images(
         "page": page,
         "page_size": page_size,
         "source_label": source_label,
+        "filters": {
+            "review_status": review_status,
+            "actor": actor,
+            "changed_only": changed_only,
+        },
     }
