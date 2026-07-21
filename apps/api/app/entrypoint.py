@@ -7,6 +7,7 @@ from . import export_manager as export_manager_module
 from . import folder_work as folder_work_module
 from . import incremental_scan as incremental_scan_module
 from . import main as main_module
+from .activity_logging import ensure_activity_logging_triggers
 from .collaboration import router as collaboration_router
 from .collaboration_summary import router as collaboration_summary_router
 from .compatibility import ensure_compatibility_triggers
@@ -77,6 +78,7 @@ def initialize_catalog_task() -> dict:
     ensure_schema_ready()
     ensure_compatibility_triggers()
     ensure_folder_work_schema()
+    ensure_activity_logging_triggers()
 
     with main_module.connect() as conn:
         image_count = conn.execute(
