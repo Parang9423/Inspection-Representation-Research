@@ -43,7 +43,7 @@ def _is_write_sql(sql: str) -> bool:
         return True
     if token == "PRAGMA":
         lowered = normalized.lower()
-        return "=" in normalized or "journal_mode" in lowered
+        return "journal_mode" in lowered or "wal_checkpoint" in lowered
     return False
 
 
@@ -75,7 +75,9 @@ class ResilientConnection(sqlite3.Connection):
     def execute(self, sql: str, parameters: Iterable[Any] = (), /):
         self._acquire_writer(sql)
         try:
-            return self._retry(lambda: super(ResilientConnection, self).execute(sql, parameters))
+            return self._retry(
+                lambda: super(ResilientConnection, self).execute(sql, parameters)
+            )
         except Exception:
             if not self.in_transaction:
                 self._release_writer()
@@ -140,7 +142,5 @@ def connect_database(db_path: Path) -> sqlite3.Connection:
     )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
