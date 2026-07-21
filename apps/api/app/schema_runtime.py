@@ -116,11 +116,14 @@ _NORMALIZED_TABLES: dict[str, tuple[str, dict[str, str]]] = {
 
 
 def _table_columns(conn, table_name: str) -> set[str]:
-    return {row["name"] for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()}
+    return {
+        row["name"]
+        for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    }
 
 
 def _ensure_legacy_image_columns() -> None:
-    """Repair partially migrated legacy images columns without deleting data."""
+    """Repair partially migrated legacy image columns without deleting data."""
     with data_model.connect() as conn:
         image_table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='images'"
@@ -131,16 +134,20 @@ def _ensure_legacy_image_columns() -> None:
         existing = _table_columns(conn, "images")
         for column_name, definition in _LEGACY_IMAGE_COLUMNS.items():
             if column_name not in existing:
-                conn.execute(f'ALTER TABLE images ADD COLUMN "{column_name}" {definition}')
+                conn.execute(
+                    f'ALTER TABLE images ADD COLUMN "{column_name}" {definition}'
+                )
 
-        conn.execute("UPDATE images SET review_status=COALESCE(review_status,'unreviewed')")
+        conn.execute(
+            "UPDATE images SET review_status=COALESCE(review_status,'unreviewed')"
+        )
         conn.execute("UPDATE images SET version=COALESCE(version,1)")
         conn.execute("UPDATE images SET is_active=COALESCE(is_active,1)")
         conn.commit()
 
 
 def _ensure_normalized_table_columns() -> None:
-    """Create or repair normalized tables before indexes reference their columns."""
+    """Create or repair normalized tables before indexes reference columns."""
     with data_model.connect() as conn:
         for table_name, (create_sql, required_columns) in _NORMALIZED_TABLES.items():
             conn.execute(create_sql)
@@ -148,42 +155,41 @@ def _ensure_normalized_table_columns() -> None:
             for column_name, definition in required_columns.items():
                 if column_name not in existing:
                     conn.execute(
-                        f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {definition}'
+                        f'ALTER TABLE "{table_name}" '
+                        f'ADD COLUMN "{column_name}" {definition}'
                     )
 
-        # Normalize values from partially migrated schemas.
         conn.execute(
-            "UPDATE image_annotations SET review_status=COALESCE(review_status,'unreviewed'), "
-            "version=COALESCE(version,1), updated_at=COALESCE(updated_at,'')"
+            "UPDATE image_annotations SET "
+            "review_status=COALESCE(review_status,'unreviewed'), "
+            "version=COALESCE(version,1), "
+            "updated_at=COALESCE(updated_at,'')"
         )
         conn.execute(
-            "UPDATE split_assignments SET split_set=COALESCE(split_set,'unassigned'), "
+            "UPDATE split_assignments SET "
+            "split_set=COALESCE(split_set,'unassigned'), "
             "split_version=COALESCE(split_version,1)"
         )
         conn.commit()
 
 
 def ensure_schema_ready() -> None:
-    """Apply versioned migrations and idempotent repairs safely.
+    """Apply migrations exactly once per API process.
 
-    Lightweight column repairs run even after process-level initialization. This
-    protects long-running APIs when a mounted DB was created by an intermediate
-    application version or replaced while the container was stopped.
+    Schema repair performs write statements and must never run on every normal API
+    request. Repeating it while the streaming scanner is committing batches causes
+    SQLite writer contention and `database is locked` failures.
     """
     global _initialized
-
-    # These checks are cheap PRAGMA/ALTER operations and must happen before the
-    # early return because the schema marker alone cannot prove every column is
-    # present in a partially migrated database.
-    _ensure_legacy_image_columns()
-    _ensure_normalized_table_columns()
-
     if _initialized:
         return
 
     with _lock:
         if _initialized:
             return
+
+        _ensure_legacy_image_columns()
+        _ensure_normalized_table_columns()
 
         with data_model.connect() as conn:
             conn.execute(
@@ -196,6 +202,7 @@ def ensure_schema_ready() -> None:
             marker = conn.execute(
                 "SELECT value FROM app_metadata WHERE key='schema_version'"
             ).fetchone()
+            conn.commit()
 
         if not marker or marker["value"] != _SCHEMA_VERSION:
             _original_ensure()
@@ -206,7 +213,8 @@ def ensure_schema_ready() -> None:
                     """INSERT INTO app_metadata(key,value,updated_at)
                        VALUES('schema_version',?,?)
                        ON CONFLICT(key) DO UPDATE SET
-                           value=excluded.value,updated_at=excluded.updated_at""",
+                         value=excluded.value,
+                         updated_at=excluded.updated_at""",
                     (_SCHEMA_VERSION, data_model.iso_now()),
                 )
                 conn.commit()
@@ -215,5 +223,5 @@ def ensure_schema_ready() -> None:
 
 
 def install_schema_guard() -> None:
-    """Replace repeated schema checks with the cached and repairing guard."""
+    """Replace repeated schema checks with the process-cached guard."""
     data_model.ensure_normalized_schema = ensure_schema_ready
