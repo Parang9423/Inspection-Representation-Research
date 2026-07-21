@@ -57,6 +57,7 @@ def serialize(row: sqlite3.Row) -> dict:
         item["locked_by"] = None
         item["locked_at"] = None
     item["image_url"] = f"/api/images/{row['image_id']}/file"
+    item["thumbnail_url"] = f"/api/images/{row['image_id']}/thumbnail"
     item["cam_url"] = f"/api/images/{row['image_id']}/cam"
     return item
 
