@@ -1,4 +1,9 @@
 from . import collaboration as collaboration_module
+from . import collaboration_summary as collaboration_summary_module
+from . import compatibility as compatibility_module
+from . import data_model as data_model_module
+from . import dataset_browser as dataset_browser_module
+from . import export_manager as export_manager_module
 from . import main as main_module
 from .collaboration import router as collaboration_router
 from .collaboration_summary import router as collaboration_summary_router
@@ -6,11 +11,27 @@ from .compatibility import ensure_compatibility_triggers
 from .data_model import router as normalized_router
 from .dataset_browser import list_hotkeys, router as dataset_browser_router
 from .export_manager import router as export_router
+from .resilient_db import connect_database
 from .scan_manager import router as scan_router, start_background_scan
 from .schema_runtime import ensure_schema_ready, install_schema_guard
 from .task_worker import worker
 
 app = main_module.app
+
+
+# Every module must use the same resilient connection factory. Some modules import
+# connect directly, so patch both the source modules and their local references.
+def resilient_connect():
+    return connect_database(main_module.DB_PATH)
+
+
+main_module.connect = resilient_connect
+data_model_module.connect = resilient_connect
+collaboration_module.connect = resilient_connect
+collaboration_summary_module.connect = resilient_connect
+compatibility_module.connect = resilient_connect
+dataset_browser_module.connect = resilient_connect
+export_manager_module.connect = resilient_connect
 
 # Legacy startup performs a full file-system scan on every API restart.
 if main_module.startup in app.router.on_startup:
@@ -19,11 +40,13 @@ if main_module.startup in app.router.on_startup:
 # Replace legacy mutation routes with normalized/background implementations.
 _replaced_paths = {"/api/scan", "/api/splits/auto", "/api/exports"}
 app.router.routes = [
-    route for route in app.router.routes
+    route
+    for route in app.router.routes
     if getattr(route, "path", None) not in _replaced_paths
 ]
 normalized_router.routes = [
-    route for route in normalized_router.routes
+    route
+    for route in normalized_router.routes
     if getattr(route, "path", None) not in {"/api/scan", "/api/exports"}
 ]
 
