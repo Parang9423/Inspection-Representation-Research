@@ -7,25 +7,28 @@ from . import export_manager as export_manager_module
 from . import folder_work as folder_work_module
 from . import incremental_scan as incremental_scan_module
 from . import main as main_module
+from . import thumbnail_cache as thumbnail_cache_module
 from .activity_logging import ensure_activity_logging_triggers
 from .collaboration import router as collaboration_router
 from .collaboration_summary import router as collaboration_summary_router
 from .compatibility import ensure_compatibility_triggers
 from .data_model import router as normalized_router
+from .database_backend import create_backend
 from .dataset_browser import list_hotkeys, router as dataset_browser_router
 from .export_manager import router as export_router
 from .folder_work import ensure_folder_work_schema, router as folder_work_router
 from .incremental_scan import router as incremental_scan_router
-from .resilient_db import connect_database
 from .scan_manager import router as scan_router, start_background_scan
 from .schema_runtime import ensure_schema_ready, install_schema_guard
 from .task_worker import worker
+from .thumbnail_cache import router as thumbnail_router
 
 app = main_module.app
+backend = create_backend(main_module.DB_PATH)
 
 
 def resilient_connect():
-    return connect_database(main_module.DB_PATH)
+    return backend.connect()
 
 
 main_module.connect = resilient_connect
@@ -37,6 +40,7 @@ dataset_browser_module.connect = resilient_connect
 export_manager_module.connect = resilient_connect
 folder_work_module.connect = resilient_connect
 incremental_scan_module.data_model.connect = resilient_connect
+thumbnail_cache_module.data_model.connect = resilient_connect
 
 if main_module.startup in app.router.on_startup:
     app.router.on_startup.remove(main_module.startup)
@@ -72,6 +76,12 @@ app.include_router(collaboration_router)
 app.include_router(collaboration_summary_router)
 app.include_router(dataset_browser_router)
 app.include_router(folder_work_router)
+app.include_router(thumbnail_router)
+
+
+@app.get("/api/storage/backend")
+def storage_backend() -> dict:
+    return backend.health()
 
 
 def initialize_catalog_task() -> dict:
@@ -88,7 +98,7 @@ def initialize_catalog_task() -> dict:
     if image_count == 0:
         start_background_scan()
 
-    return {"catalog_ready": True, "image_count": int(image_count)}
+    return {"catalog_ready": True, "image_count": int(image_count), **backend.health()}
 
 
 @app.on_event("startup")
